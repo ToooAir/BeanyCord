@@ -75,6 +75,13 @@ export class SessionManager {
     return this.states.get(userId)?.session !== undefined;
   }
 
+  /** How many users currently have a live (logged-in) session. */
+  activeSessionCount(): number {
+    let n = 0;
+    for (const s of this.states.values()) if (s.session) n += 1;
+    return n;
+  }
+
   /** Drop a fresh client (clean cookie jar) for a new login attempt. */
   resetClient(userId: string): UserState {
     this.clearPoll(userId);

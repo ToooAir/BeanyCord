@@ -29,6 +29,10 @@ import {
   handleOtpRefresh,
 } from './flow.js';
 import { CID, parseOtpRefresh } from './ids.js';
+import { formatUptime, startPresenceRotation } from './presence.js';
+
+/** Process start, for uptime in the presence rotation and /status. */
+const STARTED_AT = Date.now();
 
 /**
  * Access control. The gate exists only to stop strangers using *this host* to
@@ -122,6 +126,7 @@ export async function createBot(token: string): Promise<Client> {
 
   client.once('clientReady', (c) => {
     console.log(`🤖 logged in as ${c.user.tag}`);
+    startPresenceRotation(c, STARTED_AT);
     if (access.requiredGuildId && !c.guilds.cache.has(access.requiredGuildId)) {
       console.warn(
         `[auth] REQUIRED_GUILD_ID ${access.requiredGuildId} is not a server this bot is in — ` +
@@ -232,11 +237,15 @@ async function dispatch(
         });
       case 'status': {
         if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
-        const msg = manager.isLoggedIn(interaction.user.id)
+        const mine = manager.isLoggedIn(interaction.user.id)
           ? '✅ 已登入 (session 持續保活中)。可直接 /login 進入選單。'
           : '尚未登入。執行 /login 開始。';
+        // Authorized-only stats (not broadcast in the public presence).
+        const stats = `🤖 目前維持 ${manager.activeSessionCount()} 個帳號 session,已運行 ${formatUptime(
+          Date.now() - STARTED_AT,
+        )}。`;
         return void interaction.reply({
-          content: msg,
+          content: `${mine}\n${stats}`,
           flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined,
         });
       }

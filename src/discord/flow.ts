@@ -58,8 +58,8 @@ type Deliver = (payload: BaseMessageOptions) => Promise<Message>;
 
 /** Writes (and re-writes) the OTP/progress message to whichever target the
  *  caller chose — an edited followUp (account menu) or the button's own message
- *  edited in place (refresh). */
-type OtpWriter = (payload: BaseMessageOptions) => Promise<unknown>;
+ *  edited in place (refresh). Returns the written message so it can be tracked. */
+type OtpWriter = (payload: BaseMessageOptions) => Promise<Message>;
 
 /** Defer ~400ms before Discord's 3s ack deadline only if the first message
  *  isn't ready yet, so a slow QR build can't kill the interaction. The fast
@@ -133,12 +133,14 @@ async function beginLogin(
   if (manager.isLoggedIn(userId)) {
     try {
       const games = await listGames(manager.get(userId)!.client);
-      await deliver(buildGameMenuPayload(games, '你已登入。請選擇遊戲:'));
+      const m = await deliver(buildGameMenuPayload(games, '你已登入。請選擇遊戲:'));
+      await setActive(userId, m, 'menu'); // retires any prior menu/OTP
     } catch (e) {
-      await deliver({
+      const m = await deliver({
         content: `⚠️ 你的登入似乎已失效(${errText(e)})。請重新登入:`,
         components: [reloginRow()],
       });
+      await setActive(userId, m, 'menu');
     }
     return;
   }
@@ -161,9 +163,11 @@ async function sendFreshQr(
     state.pendingInit = init;
 
     const msg = await deliver(buildQrPayload(init.bitmapBase64, init.deeplink));
+    await setActive(userId, msg, 'menu'); // retires any prior menu/OTP
     startQrPolling(manager, userId, dm, msg);
   } catch (e) {
-    await deliver({ content: `❌ 啟動登入失敗:${errText(e)}`, components: [reloginRow()] });
+    const m = await deliver({ content: `❌ 啟動登入失敗:${errText(e)}`, components: [reloginRow()] });
+    await setActive(userId, m, 'menu');
     manager.remove(userId);
   }
 }
@@ -233,7 +237,7 @@ function startQrPolling(
         state.session = session;
         await manager.persist(userId); // encrypt + store + start 60s keep-alive
         await safeEdit(qrMessage, '✅ 登入成功!', []);
-        await sendGameMenu(state.client, dm, '請選擇遊戲:');
+        await sendGameMenu(userId, state.client, dm, '請選擇遊戲:');
         return;
       }
       // WaitLogin / Failed -> schedule next tick
@@ -271,9 +275,15 @@ function buildGameMenuPayload(
 }
 
 /** Fetch games and post the menu to the DM (used after QR approval). */
-async function sendGameMenu(client: BeanfunClient, dm: DMChannel, prompt: string): Promise<void> {
+async function sendGameMenu(
+  userId: string,
+  client: BeanfunClient,
+  dm: DMChannel,
+  prompt: string,
+): Promise<void> {
   const games = await listGames(client);
-  await dm.send(buildGameMenuPayload(games, prompt));
+  const m = await dm.send(buildGameMenuPayload(games, prompt));
+  await setActive(userId, m, 'menu'); // retires the QR / "登入成功" breadcrumb
 }
 
 export async function handleGameSelect(
@@ -315,7 +325,10 @@ export async function handleGameSelect(
         await interaction.followUp({ content: `**${gameName}** 沒有任何服務帳號。` });
         return;
       }
-      await interaction.followUp(buildAccountMenuPayload(accounts, `🎮 **${gameName}**\n請選擇帳號:`));
+      const accMsg = await interaction.followUp(
+        buildAccountMenuPayload(accounts, `🎮 **${gameName}**\n請選擇帳號:`),
+      );
+      await setActive(userId, accMsg, 'menu'); // deletes the "載入中" game-menu msg
     } catch (e) {
       await interaction.followUp({
         content: `❌ 載入帳號失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
@@ -384,7 +397,8 @@ export async function handleChangeGame(
     await safeStripButtons(interaction.message as Message);
     try {
       const games = await listGames(state.client);
-      await interaction.followUp(buildGameMenuPayload(games, '請選擇遊戲:'));
+      const m = await interaction.followUp(buildGameMenuPayload(games, '請選擇遊戲:'));
+      await setActive(userId, m, 'menu');
     } catch (e) {
       await interaction.followUp({
         content: `⚠️ 載入遊戲清單失敗(${errText(e)})。請重新登入:`,
@@ -425,7 +439,10 @@ export async function handleChangeAccount(
         await interaction.followUp({ content: `**${game}** 沒有任何服務帳號。` });
         return;
       }
-      await interaction.followUp(buildAccountMenuPayload(accounts, `🎮 **${game}**\n請選擇帳號:`));
+      const m = await interaction.followUp(
+        buildAccountMenuPayload(accounts, `🎮 **${game}**\n請選擇帳號:`),
+      );
+      await setActive(userId, m, 'menu');
     } catch (e) {
       await interaction.followUp({
         content: `❌ 載入帳號失敗:${errText(e)}\n請重新登入:`,
@@ -497,7 +514,7 @@ async function deliverOtp(
           .setStyle(ButtonStyle.Danger),
       );
       const gameLabel = state.session.serviceName ? `🎮 ${state.session.serviceName}\n` : '';
-      await write({
+      const otpMsg = await write({
         content:
           gameLabel +
           `🔑 **${account.sname}** 的登入資訊\n` +
@@ -506,6 +523,7 @@ async function deliverOtp(
           `-# ⚠️ 此 OTP 與按鈕會留在 DM 紀錄中,請勿外流;用完可按 🗑 刪除本訊息。`,
         components: [row],
       });
+      await setActive(userId, otpMsg, 'otp'); // same message id -> just flips kind
     } catch (e) {
       await write({
         content: `❌ 取得 OTP 失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
@@ -544,6 +562,7 @@ async function resolveAccount(state: UserState, sid: string): Promise<ServiceAcc
 export function handleLogout(manager: SessionManager, userId: string): string {
   if (!manager.get(userId)) return '你目前沒有登入。';
   manager.remove(userId);
+  clearActive(userId); // drop the tracked handle; old buttons fail closed anyway
   return '已登出並清除本機 session。';
 }
 
@@ -553,6 +572,7 @@ export async function handleLoginCancel(
 ): Promise<void> {
   await interaction.deferUpdate();
   manager.remove(interaction.user.id);
+  clearActive(interaction.user.id);
   await safeEdit(interaction.message as Message, '已取消登入。', []);
 }
 
@@ -578,4 +598,35 @@ async function safeStripButtons(msg: Message): Promise<void> {
   } catch {
     /* message may be gone; ignore */
   }
+}
+
+/** Delete a message (best-effort). */
+async function safeDelete(msg: Message): Promise<void> {
+  try {
+    await msg.delete();
+  } catch {
+    /* already gone; ignore */
+  }
+}
+
+// ---- single active control surface per user --------------------------------
+// Each user has at most one live menu/OTP message. Posting a new one retires the
+// previous: menus (and transient "載入中"/"登入成功" breadcrumbs) are deleted; an
+// OTP message just has its buttons stripped so its value is kept. The message-id
+// guard means an in-place edit (account menu -> OTP, same message) doesn't retire
+// itself. In-memory only (handles can't survive a restart).
+type ActiveKind = 'menu' | 'otp';
+const activeByUser = new Map<string, { message: Message; kind: ActiveKind }>();
+
+async function setActive(userId: string, message: Message, kind: ActiveKind): Promise<void> {
+  const prev = activeByUser.get(userId);
+  if (prev && prev.message.id !== message.id) {
+    if (prev.kind === 'menu') await safeDelete(prev.message);
+    else await safeStripButtons(prev.message);
+  }
+  activeByUser.set(userId, { message, kind });
+}
+
+function clearActive(userId: string): void {
+  activeByUser.delete(userId);
 }

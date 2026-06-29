@@ -12,6 +12,10 @@ export interface Session {
   accountId: string;
   serviceCode: string;
   serviceRegion: string;
+  /** Selected game's display name — UI-only, set by the Discord flow so OTP /
+   *  account messages stay self-explanatory. Optional (older persisted sessions
+   *  won't have it). */
+  serviceName?: string;
 }
 
 /** One row of the user's service-account list. Mirrors Rust `ServiceAccount`. */

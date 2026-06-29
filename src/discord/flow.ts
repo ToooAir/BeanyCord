@@ -285,16 +285,22 @@ export async function handleGameSelect(
       return;
     }
     const value = interaction.values[0] ?? '';
+    // Keep the chosen game's display name so the loading + account-pick messages
+    // stay self-explanatory when the user scrolls back later.
+    const gameName = interaction.component.options.find((o) => o.value === value)?.label ?? value;
     const sep = value.lastIndexOf('_');
     const serviceCode = value.slice(0, sep);
     const serviceRegion = value.slice(sep + 1);
     state.session.serviceCode = serviceCode;
     state.session.serviceRegion = serviceRegion;
+    state.session.serviceName = gameName; // persisted so OTP messages can show it
     await manager.persist(userId); // re-save selected game + any rotated cookies
 
     try {
-      await interaction.editReply({ content: '已選擇遊戲,載入帳號中…', components: [] });
-      const { accounts, amountLimitNotice } = await getAccounts(
+      await interaction.editReply({ content: `🎮 已選擇 **${gameName}**,載入帳號中…`, components: [] });
+      // amountLimitNotice (e.g. "此遊戲最多允許新增帳號數:1") is dropped on purpose:
+      // this bot has no add-account feature, so it's just confusing noise.
+      const { accounts } = await getAccounts(
         state.client,
         state.session,
         serviceCode,
@@ -302,12 +308,10 @@ export async function handleGameSelect(
       );
       state.accounts = accounts;
       if (accounts.length === 0) {
-        await interaction.followUp({ content: '此遊戲沒有任何服務帳號。' });
+        await interaction.followUp({ content: `**${gameName}** 沒有任何服務帳號。` });
         return;
       }
-      const notice =
-        amountLimitNotice.kind === 'other' ? `\n(${amountLimitNotice.text})` : '';
-      await sendAccountMenu(interaction, accounts, `請選擇帳號:${notice}`);
+      await sendAccountMenu(interaction, accounts, `🎮 **${gameName}**\n請選擇帳號:`);
     } catch (e) {
       await interaction.followUp({
         content: `❌ 載入帳號失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
@@ -397,8 +401,10 @@ async function deliverOtp(
           .setLabel('重新產生 OTP')
           .setStyle(ButtonStyle.Primary),
       );
+      const gameLabel = state.session.serviceName ? `🎮 ${state.session.serviceName}\n` : '';
       await write({
         content:
+          gameLabel +
           `🔑 **${account.sname}** 的登入資訊\n` +
           `帳號:\n\`\`\`\n${account.sid}\n\`\`\`\n` +
           `OTP:\n\`\`\`\n${otp}\n\`\`\`\n` +

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="avatar.jpg" alt="BeanyCord 吉祥物" width="200">
+</p>
+
 # BeanyCord
 
 一個 Discord 機器人，把 Beanfun 的 **QR 登入 → OTP** 流程搬到 Node.js/TypeScript，

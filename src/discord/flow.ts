@@ -13,6 +13,7 @@ import {
   ButtonStyle,
   ChannelType,
   EmbedBuilder,
+  MessageFlags,
   StringSelectMenuBuilder,
   type BaseMessageOptions,
   type ButtonInteraction,
@@ -98,7 +99,7 @@ export async function handleLogin(
   } catch {
     await interaction.reply({
       content: '我無法私訊你 — 請開啟「允許伺服器成員私訊」後再試。',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -106,7 +107,10 @@ export async function handleLogin(
   if (!isPrivateDm) {
     // Guild or group DM: point the user to their 1:1 DM and deliver there, so
     // the QR / OTP never land in a channel others can read.
-    await interaction.reply({ content: '已在你的私訊開始登入流程,請查看 DM。', ephemeral: true });
+    await interaction.reply({
+      content: '已在你的私訊開始登入流程,請查看 DM。',
+      flags: MessageFlags.Ephemeral,
+    });
     await manager.withLock(userId, () => beginLogin(manager, userId, dm, (p) => dm.send(p)));
     return;
   }

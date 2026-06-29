@@ -7,6 +7,7 @@ import { timingSafeEqual } from 'node:crypto';
 import {
   Client,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   type ChatInputCommandInteraction,
   type Guild,
@@ -154,7 +155,7 @@ async function isAuthorized(access: AccessControl, interaction: Interaction): Pr
 async function refuse(interaction: Interaction, content: string): Promise<void> {
   if (!interaction.isRepliable()) return;
   try {
-    await interaction.reply({ content, ephemeral: true });
+    await interaction.reply({ content, flags: MessageFlags.Ephemeral });
   } catch {
     /* nothing more we can do */
   }
@@ -227,14 +228,17 @@ async function dispatch(
         if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
         return void interaction.reply({
           content: handleLogout(manager, interaction.user.id),
-          ephemeral: interaction.inGuild(),
+          flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined,
         });
       case 'status': {
         if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
         const msg = manager.isLoggedIn(interaction.user.id)
           ? '✅ 已登入 (session 持續保活中)。可直接 /login 進入選單。'
           : '尚未登入。執行 /login 開始。';
-        return void interaction.reply({ content: msg, ephemeral: interaction.inGuild() });
+        return void interaction.reply({
+          content: msg,
+          flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined,
+        });
       }
       default:
         return;

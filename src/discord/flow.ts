@@ -292,10 +292,15 @@ export async function handleGameSelect(
 ): Promise<void> {
   const userId = interaction.user.id;
   await interaction.deferUpdate();
+  // Post follow-up messages via dm.send (plain) rather than interaction.followUp:
+  // a component followUp renders as a *reply* to the interaction's source message,
+  // which we delete on the next step -> "original message deleted". A plain send
+  // carries no such reference.
+  const dm = await interaction.user.createDM();
   await manager.withLock(userId, async () => {
     const state = manager.get(userId);
     if (!state?.session) {
-      await interaction.followUp({ content: '你的登入已失效,請重新登入:', components: [reloginRow()] });
+      await dm.send({ content: '你的登入已失效,請重新登入:', components: [reloginRow()] });
       return;
     }
     const value = interaction.values[0] ?? '';
@@ -322,15 +327,15 @@ export async function handleGameSelect(
       );
       state.accounts = accounts;
       if (accounts.length === 0) {
-        await interaction.followUp({ content: `**${gameName}** 沒有任何服務帳號。` });
+        await dm.send({ content: `**${gameName}** 沒有任何服務帳號。` });
         return;
       }
-      const accMsg = await interaction.followUp(
+      const accMsg = await dm.send(
         buildAccountMenuPayload(accounts, `🎮 **${gameName}**\n請選擇帳號:`),
       );
       await setActive(userId, accMsg, 'menu'); // deletes the "載入中" game-menu msg
     } catch (e) {
-      await interaction.followUp({
+      await dm.send({
         content: `❌ 載入帳號失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
         components: [reloginRow()],
       });
@@ -388,19 +393,20 @@ export async function handleChangeGame(
 ): Promise<void> {
   await interaction.deferUpdate();
   const userId = interaction.user.id;
+  const dm = await interaction.user.createDM(); // plain send — no reply reference
   await manager.withLock(userId, async () => {
     const state = manager.get(userId);
     if (!state?.session) {
-      await interaction.followUp({ content: '你的登入已失效,請重新登入:', components: [reloginRow()] });
+      await dm.send({ content: '你的登入已失效,請重新登入:', components: [reloginRow()] });
       return;
     }
     await safeStripButtons(interaction.message as Message);
     try {
       const games = await listGames(state.client);
-      const m = await interaction.followUp(buildGameMenuPayload(games, '請選擇遊戲:'));
+      const m = await dm.send(buildGameMenuPayload(games, '請選擇遊戲:'));
       await setActive(userId, m, 'menu');
     } catch (e) {
-      await interaction.followUp({
+      await dm.send({
         content: `⚠️ 載入遊戲清單失敗(${errText(e)})。請重新登入:`,
         components: [reloginRow()],
       });
@@ -416,10 +422,11 @@ export async function handleChangeAccount(
 ): Promise<void> {
   await interaction.deferUpdate();
   const userId = interaction.user.id;
+  const dm = await interaction.user.createDM(); // plain send — no reply reference
   await manager.withLock(userId, async () => {
     const state = manager.get(userId);
     if (!state?.session?.serviceCode) {
-      await interaction.followUp({
+      await dm.send({
         content: '你的登入已失效或尚未選擇遊戲,請重新登入:',
         components: [reloginRow()],
       });
@@ -436,15 +443,13 @@ export async function handleChangeAccount(
       );
       state.accounts = accounts;
       if (accounts.length === 0) {
-        await interaction.followUp({ content: `**${game}** 沒有任何服務帳號。` });
+        await dm.send({ content: `**${game}** 沒有任何服務帳號。` });
         return;
       }
-      const m = await interaction.followUp(
-        buildAccountMenuPayload(accounts, `🎮 **${game}**\n請選擇帳號:`),
-      );
+      const m = await dm.send(buildAccountMenuPayload(accounts, `🎮 **${game}**\n請選擇帳號:`));
       await setActive(userId, m, 'menu');
     } catch (e) {
-      await interaction.followUp({
+      await dm.send({
         content: `❌ 載入帳號失敗:${errText(e)}\n請重新登入:`,
         components: [reloginRow()],
       });

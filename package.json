@@ -1,0 +1,38 @@
+{
+  "name": "beanycord",
+  "private": true,
+  "version": "0.1.0",
+  "description": "BeanyCord — a Discord bot that delivers Beanfun game OTPs via QR login, ported to Node.js from the Rust/Tauri Beanfun client.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "m0": "NODE_OPTIONS=--openssl-legacy-provider tsx src/m0.ts",
+    "bot": "NODE_OPTIONS=--openssl-legacy-provider tsx src/index.ts",
+    "register": "tsx src/discord/registerCommands.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "register:prod": "node dist/discord/registerCommands.js",
+    "test": "NODE_OPTIONS=--openssl-legacy-provider vitest run",
+    "test:watch": "NODE_OPTIONS=--openssl-legacy-provider vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7",
+    "got": "^14.4.5",
+    "he": "^1.2.0",
+    "https-proxy-agent": "^7.0.6",
+    "tough-cookie": "^5.1.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/he": "^1.2.3",
+    "@types/node": "^22.13.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

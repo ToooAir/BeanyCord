@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.log
+qr.png
+.DS_Store
+*.sqlite*
+*.db
+data/
+
+# Internal AI planning notes — contain local paths / session metadata; never publish
+docs/memory/

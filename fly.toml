@@ -1,0 +1,33 @@
+# BeanyCord — Fly.io config.
+#
+# This is a long-running WORKER (outbound Discord gateway + Beanfun HTTP only),
+# so there is NO [http_service] / public port. It MUST run as a SINGLE machine:
+# Discord allows one gateway connection per token, the SQLite DB lives on one
+# volume, and per-user session state is in-memory. Never scale this above 1.
+app = "beanycord"
+primary_region = "nrt" # Tokyo — close to TW; see README about Beanfun risk control
+
+[build]
+
+[env]
+  NODE_OPTIONS = "--openssl-legacy-provider"          # required for DES OTP decrypt
+  SESSION_DB_PATH = "/data/beanycord.sqlite"          # on the mounted volume
+  SESSION_MAX_AGE_DAYS = "30"
+  # Non-secret access-control knobs can live here; secrets go via `fly secrets`.
+  # REQUIRED_GUILD_ID = ""
+  # ALLOWED_DISCORD_IDS = ""
+  # DISCORD_USER_INSTALL = "0"
+
+# Persist the encrypted SQLite DB (sessions + enrollment) across deploys.
+[mounts]
+  source = "beanycord_data"
+  destination = "/data"
+
+# One volume can attach to one machine — recreate in place rather than running
+# two machines (which would open a second Discord connection).
+[deploy]
+  strategy = "immediate"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

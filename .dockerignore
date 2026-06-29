@@ -1,0 +1,21 @@
+# Rebuilt inside the image (host is likely a different arch → wrong native binary)
+node_modules
+dist
+
+# Secrets & local state — never bake into the image
+.env
+data
+*.sqlite*
+*.sqlite
+*.log
+qr.png
+
+# Internal planning notes / not needed at runtime
+docs
+test
+
+# VCS / misc
+.git
+.gitignore
+.DS_Store
+README.md

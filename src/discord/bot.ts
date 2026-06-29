@@ -18,6 +18,8 @@ import { SessionManager } from '../core/sessionManager.js';
 import { createStore, type SessionStore } from '../core/store.js';
 import {
   handleAccountSelect,
+  handleChangeAccount,
+  handleChangeGame,
   handleGameSelect,
   handleLogin,
   handleLoginCancel,
@@ -252,6 +254,8 @@ async function dispatch(
   if (interaction.isButton()) {
     if (interaction.customId === CID.loginCancel) return handleLoginCancel(manager, interaction);
     if (interaction.customId === CID.loginRefresh) return handleLoginRefresh(manager, interaction);
+    if (interaction.customId === CID.gameAgain) return handleChangeGame(manager, interaction);
+    if (interaction.customId === CID.accountAgain) return handleChangeAccount(manager, interaction);
     if (parseOtpRefresh(interaction.customId)) return handleOtpRefresh(manager, interaction);
     return;
   }

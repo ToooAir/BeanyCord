@@ -311,7 +311,7 @@ export async function handleGameSelect(
         await interaction.followUp({ content: `**${gameName}** 沒有任何服務帳號。` });
         return;
       }
-      await sendAccountMenu(interaction, accounts, `🎮 **${gameName}**\n請選擇帳號:`);
+      await interaction.followUp(buildAccountMenuPayload(accounts, `🎮 **${gameName}**\n請選擇帳號:`));
     } catch (e) {
       await interaction.followUp({
         content: `❌ 載入帳號失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
@@ -321,11 +321,7 @@ export async function handleGameSelect(
   });
 }
 
-async function sendAccountMenu(
-  interaction: StringSelectMenuInteraction,
-  accounts: ServiceAccount[],
-  prompt: string,
-): Promise<void> {
+function buildAccountMenuPayload(accounts: ServiceAccount[], prompt: string): BaseMessageOptions {
   const options = accounts.slice(0, 25).map((a) => ({
     label: a.sname.slice(0, 100),
     description: `ssn=${a.ssn}`.slice(0, 100),
@@ -335,10 +331,10 @@ async function sendAccountMenu(
     .setCustomId(CID.accountSelect)
     .setPlaceholder('選擇帳號')
     .addOptions(options);
-  await interaction.followUp({
+  return {
     content: prompt,
     components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
-  });
+  };
 }
 
 // ---- account select -> OTP -------------------------------------------------
@@ -349,10 +345,10 @@ export async function handleAccountSelect(
 ): Promise<void> {
   await interaction.deferUpdate();
   const sid = interaction.values[0] ?? '';
-  // Show progress in a new message (keep the account menu so other accounts can
-  // still be picked), then resolve it into the OTP.
-  const progress = await interaction.followUp({ content: '⏳ 正在產生 OTP…' });
-  await deliverOtp(manager, interaction.user.id, sid, (p) => progress.edit(p));
+  // One-shot: turn THIS account-menu message into the OTP (drop the menu so it
+  // can't linger and go stale). Re-navigation is via the OTP message's buttons.
+  await interaction.editReply({ content: '⏳ 正在產生 OTP…', components: [] });
+  await deliverOtp(manager, interaction.user.id, sid, (p) => interaction.editReply(p));
 }
 
 export async function handleOtpRefresh(
@@ -365,6 +361,74 @@ export async function handleOtpRefresh(
   // same message into the fresh OTP.
   await interaction.update({ content: '⏳ 正在產生新的 OTP…', components: [] });
   await deliverOtp(manager, interaction.user.id, sid, (p) => interaction.editReply(p));
+}
+
+/** "🎮 換遊戲" on the OTP message — re-open the game menu, no /login needed.
+ *  Consumes the OTP message's buttons so only one control surface stays live. */
+export async function handleChangeGame(
+  manager: SessionManager,
+  interaction: ButtonInteraction,
+): Promise<void> {
+  await interaction.deferUpdate();
+  const userId = interaction.user.id;
+  await manager.withLock(userId, async () => {
+    const state = manager.get(userId);
+    if (!state?.session) {
+      await interaction.followUp({ content: '你的登入已失效,請重新登入:', components: [reloginRow()] });
+      return;
+    }
+    await safeStripButtons(interaction.message as Message);
+    try {
+      const games = await listGames(state.client);
+      await interaction.followUp(buildGameMenuPayload(games, '請選擇遊戲:'));
+    } catch (e) {
+      await interaction.followUp({
+        content: `⚠️ 載入遊戲清單失敗(${errText(e)})。請重新登入:`,
+        components: [reloginRow()],
+      });
+    }
+  });
+}
+
+/** "👤 換帳號" on the OTP message — re-open the account menu for the current
+ *  game, no /login needed. Consumes the OTP message's buttons. */
+export async function handleChangeAccount(
+  manager: SessionManager,
+  interaction: ButtonInteraction,
+): Promise<void> {
+  await interaction.deferUpdate();
+  const userId = interaction.user.id;
+  await manager.withLock(userId, async () => {
+    const state = manager.get(userId);
+    if (!state?.session?.serviceCode) {
+      await interaction.followUp({
+        content: '你的登入已失效或尚未選擇遊戲,請重新登入:',
+        components: [reloginRow()],
+      });
+      return;
+    }
+    await safeStripButtons(interaction.message as Message);
+    const game = state.session.serviceName ?? '此遊戲';
+    try {
+      const { accounts } = await getAccounts(
+        state.client,
+        state.session,
+        state.session.serviceCode,
+        state.session.serviceRegion,
+      );
+      state.accounts = accounts;
+      if (accounts.length === 0) {
+        await interaction.followUp({ content: `**${game}** 沒有任何服務帳號。` });
+        return;
+      }
+      await interaction.followUp(buildAccountMenuPayload(accounts, `🎮 **${game}**\n請選擇帳號:`));
+    } catch (e) {
+      await interaction.followUp({
+        content: `❌ 載入帳號失敗:${errText(e)}\n請重新登入:`,
+        components: [reloginRow()],
+      });
+    }
+  });
 }
 
 async function deliverOtp(
@@ -398,8 +462,16 @@ async function deliverOtp(
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(otpRefreshId(account.sid))
-          .setLabel('重新產生 OTP')
+          .setLabel('🔄 重新產生 OTP')
           .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(CID.accountAgain)
+          .setLabel('👤 換帳號')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(CID.gameAgain)
+          .setLabel('🎮 換遊戲')
+          .setStyle(ButtonStyle.Secondary),
       );
       const gameLabel = state.session.serviceName ? `🎮 ${state.session.serviceName}\n` : '';
       await write({
@@ -470,6 +542,16 @@ async function safeEdit(
 ): Promise<void> {
   try {
     await msg.edit({ content, embeds: [], files: [], components });
+  } catch {
+    /* message may be gone; ignore */
+  }
+}
+
+/** Drop a message's buttons (best-effort), keeping its content — used to retire
+ *  the OTP message's nav buttons when the user navigates away. */
+async function safeStripButtons(msg: Message): Promise<void> {
+  try {
+    await msg.edit({ components: [] });
   } catch {
     /* message may be gone; ignore */
   }

@@ -8,6 +8,10 @@ export const CID = {
   loginRefresh: 'bf:login:refresh',
   /** Button; cancel the in-flight login. */
   loginCancel: 'bf:login:cancel',
+  /** Button (on the OTP message); re-open the game menu for the current session. */
+  gameAgain: 'bf:game:again',
+  /** Button (on the OTP message); re-open the account menu for the current game. */
+  accountAgain: 'bf:account:again',
 } as const;
 
 /** Button to re-generate an OTP for a specific account: `bf:otp:<sid>`. */

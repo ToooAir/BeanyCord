@@ -26,6 +26,7 @@ import {
   handleLoginCancel,
   handleLoginRefresh,
   handleLogout,
+  handleOtpDelete,
   handleOtpRefresh,
 } from './flow.js';
 import { CID, parseOtpRefresh } from './ids.js';
@@ -269,6 +270,7 @@ async function dispatch(
     if (interaction.customId === CID.loginRefresh) return handleLoginRefresh(manager, interaction);
     if (interaction.customId === CID.gameAgain) return handleChangeGame(manager, interaction);
     if (interaction.customId === CID.accountAgain) return handleChangeAccount(manager, interaction);
+    if (interaction.customId === CID.otpDelete) return handleOtpDelete(interaction);
     if (parseOtpRefresh(interaction.customId)) return handleOtpRefresh(manager, interaction);
     return;
   }

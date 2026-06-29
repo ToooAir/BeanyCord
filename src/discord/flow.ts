@@ -435,6 +435,21 @@ export async function handleChangeAccount(
   });
 }
 
+/** "🗑 刪除" on the OTP message — users can't delete a bot's DM message, so the
+ *  bot deletes its own. ack first to avoid a "interaction failed" flash. */
+export async function handleOtpDelete(interaction: ButtonInteraction): Promise<void> {
+  try {
+    await interaction.deferUpdate();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await interaction.message.delete();
+  } catch {
+    /* already gone; nothing to do */
+  }
+}
+
 async function deliverOtp(
   manager: SessionManager,
   userId: string,
@@ -476,6 +491,10 @@ async function deliverOtp(
           .setCustomId(CID.gameAgain)
           .setLabel('🎮 換遊戲')
           .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(CID.otpDelete)
+          .setLabel('🗑 刪除')
+          .setStyle(ButtonStyle.Danger),
       );
       const gameLabel = state.session.serviceName ? `🎮 ${state.session.serviceName}\n` : '';
       await write({
@@ -484,7 +503,7 @@ async function deliverOtp(
           `🔑 **${account.sname}** 的登入資訊\n` +
           `帳號:\n\`\`\`\n${account.sid}\n\`\`\`\n` +
           `OTP:\n\`\`\`\n${otp}\n\`\`\`\n` +
-          `-# ⚠️ 此 OTP 與按鈕會留在 DM 紀錄中,請勿外流;不需要時可刪除本訊息。`,
+          `-# ⚠️ 此 OTP 與按鈕會留在 DM 紀錄中,請勿外流;用完可按 🗑 刪除本訊息。`,
         components: [row],
       });
     } catch (e) {

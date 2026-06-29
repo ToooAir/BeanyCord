@@ -21,6 +21,8 @@ import {
   handleAccountSelect,
   handleChangeAccount,
   handleChangeGame,
+  handleClear,
+  handleClearConfirm,
   handleGameSelect,
   handleLogin,
   handleLoginCancel,
@@ -250,6 +252,9 @@ async function dispatch(
           flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined,
         });
       }
+      case 'clear':
+        if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
+        return handleClear(interaction);
       default:
         return;
     }
@@ -271,6 +276,7 @@ async function dispatch(
     if (interaction.customId === CID.gameAgain) return handleChangeGame(manager, interaction);
     if (interaction.customId === CID.accountAgain) return handleChangeAccount(manager, interaction);
     if (interaction.customId === CID.otpDelete) return handleOtpDelete(interaction);
+    if (interaction.customId === CID.clearConfirm) return handleClearConfirm(interaction);
     if (parseOtpRefresh(interaction.customId)) return handleOtpRefresh(manager, interaction);
     return;
   }

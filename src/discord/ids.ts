@@ -16,6 +16,8 @@ export const CID = {
    *  users can't delete a bot's DM message themselves). NOT under `bf:otp:` so
    *  it doesn't collide with the otp-refresh prefix. */
   otpDelete: 'bf:delete',
+  /** Button; confirm /clear — delete ALL of the bot's messages in this DM. */
+  clearConfirm: 'bf:clear:confirm',
 } as const;
 
 /** Button to re-generate an OTP for a specific account: `bf:otp:<sid>`. */

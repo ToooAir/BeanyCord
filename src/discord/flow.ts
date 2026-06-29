@@ -576,6 +576,66 @@ export async function handleLoginCancel(
   await safeEdit(interaction.message as Message, '已取消登入。', []);
 }
 
+// ---- /clear ----------------------------------------------------------------
+
+/** `/clear` — ask to confirm before wiping the bot's DM messages. */
+export async function handleClear(interaction: ChatInputCommandInteraction): Promise<void> {
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(CID.clearConfirm).setLabel('🗑 確認刪除').setStyle(ButtonStyle.Danger),
+  );
+  await interaction.reply({
+    content:
+      '這會刪除我在你私訊裡發過的**所有**訊息(OTP、選單、QR 等)。\n' +
+      '你自己打的訊息我無法刪除,且此操作**無法復原**。要繼續嗎?',
+    components: [row],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+/** Confirm button — page through the DM and delete every bot-authored message. */
+export async function handleClearConfirm(interaction: ButtonInteraction): Promise<void> {
+  await interaction.update({ content: '🧹 清除中…', components: [] });
+  const userId = interaction.user.id;
+  const botId = interaction.client.user.id;
+
+  let dm: DMChannel;
+  try {
+    dm = await interaction.user.createDM();
+  } catch {
+    await interaction.editReply({ content: '❌ 無法存取你的私訊。' }).catch(() => undefined);
+    return;
+  }
+
+  clearActive(userId); // the tracked message is about to be deleted anyway
+
+  // DMs can't bulkDelete, so delete one-by-one (no age limit; discord.js queues
+  // around the rate limit). Skip this interaction's own (ephemeral) message.
+  let deleted = 0;
+  let before: string | undefined;
+  for (;;) {
+    const batch = await dm.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+    if (batch.size === 0) break;
+    before = batch.last()?.id;
+    for (const m of batch.values()) {
+      if (m.author.id !== botId || m.id === interaction.message.id) continue;
+      try {
+        await m.delete();
+        deleted += 1;
+        if (deleted % 20 === 0) {
+          await interaction.editReply({ content: `🧹 清除中… 已刪除 ${deleted} 則` }).catch(() => undefined);
+        }
+      } catch {
+        /* individual failure (already gone / too old): skip */
+      }
+    }
+    if (batch.size < 100) break;
+  }
+
+  await interaction
+    .editReply({ content: `✅ 已刪除 ${deleted} 則我發過的訊息。` })
+    .catch(() => undefined);
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 async function safeEdit(

@@ -37,4 +37,7 @@ export const commands = [
     ),
   new SlashCommandBuilder().setName('logout').setDescription('登出並清除你的 Beanfun session'),
   new SlashCommandBuilder().setName('status').setDescription('查看你目前的登入狀態'),
+  new SlashCommandBuilder()
+    .setName('clear')
+    .setDescription('刪除我在這個 DM 發過的所有訊息 (OTP/選單等)'),
 ].map((c) => c.setContexts(contexts).setIntegrationTypes(integrationTypes).toJSON());

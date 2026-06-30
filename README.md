@@ -52,7 +52,8 @@ Three layers, deliberately decoupled so the protocol core never imports Discord:
 ```
 src/
 ├── beanfun/        Protocol core — pure HTTP + crypto, no Discord, no Node-only deps
-│   ├── client.ts       got-based HTTP client w/ per-user cookie jar, bounded bodies
+│   ├── client.ts       per-user HTTP client: one cookie jar shared by two got
+│   │                   instances (redirect / no-redirect), bounded response bodies
 │   ├── login/          QR login state machine: init → poll → finalize → session key
 │   ├── otp.ts          5-step OTP retrieval pipeline + WCDES decrypt
 │   ├── wcdes.ts        DES-ECB-NoPadding, byte-compatible with the WPF/Rust reference

@@ -110,8 +110,9 @@ npm run bot                 # 啟動機器人
 - **金鑰與檔案權限**：`SESSION_ENCRYPTION_KEY`（`openssl rand -hex 32`）啟用持久化，
   **務必保持穩定**（換掉＝所有 session 失效需重掃）。加密金鑰與 DB 同主機，故加密只防
   DB **單獨**外洩、**不防主機入侵**；請 `chmod 600 .env`、別把 `.env` 與 DB 一起備份。
-- `SESSION_MAX_AGE_DAYS`（預設 30）：逾期未更新的 session 於載入時清除，限制外洩 DB
-  的可用時效。
+- `SESSION_MAX_AGE_DAYS`（預設 30）：限制外洩 DB 的可用時效。時效從**最後一次寫入**
+  （登入或換遊戲）起算——keep-alive ping 與取 OTP **都不會**延長它；且清除只在
+  **行程重啟／重新部署載入時** lazy 觸發，沒有常駐計時器。
 
 ## 部署到 Fly.io
 

@@ -84,9 +84,15 @@ The bot hands out live OTPs for other people's game accounts, so the security
 model is the point, not an afterthought.
 
 **Per-user isolation.** Every Discord user gets their own `BeanfunClient` with its
-own cookie jar. All state is keyed by the Discord-authenticated `interaction.user.id`.
-There is no code path where supplying someone else's account id (`sid`) yields their
-OTP — cross-user theft is structurally impossible, not merely access-checked.
+own cookie jar, keyed by `interaction.user.id`. That id is not a client-supplied
+field: interactions arrive over the bot's authenticated gateway connection and
+Discord stamps the caller's identity server-side, so it can't be forged by a user
+crafting input. The one field a user *can* control — the service-account id (`sid`)
+in a button/menu — is resolved only against that caller's *own* fetched account
+list and used only with their *own* session, and Beanfun itself only issues an OTP
+for an account under the authenticated session. So cross-user theft is structurally
+impossible — barred at three layers (Discord identity, local sid scoping,
+Beanfun-side session ownership), not merely access-checked.
 
 **Secrets at rest.** Sessions (cookie jar + handle, which include the Beanfun web
 token) are persisted **AES-256-GCM** encrypted in SQLite, layout

@@ -529,6 +529,11 @@ async function deliverOtp(
         components: [row],
       });
       await setActive(userId, otpMsg, 'otp'); // same message id -> just flips kind
+      // Active use refreshes the stored session: persist the cookies rotated
+      // during getOtp and bump updated_at so SESSION_MAX_AGE_DAYS behaves as an
+      // idle timeout (only abandoned sessions expire). Best-effort — a persist
+      // failure must not turn an already-delivered OTP into an error.
+      await manager.persist(userId).catch(() => undefined);
     } catch (e) {
       await write({
         content: `❌ 取得 OTP 失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,

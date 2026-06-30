@@ -103,11 +103,12 @@ This is honestly scoped: the key lives on the same host, so encryption protects 
 **DB-alone leak**, not a full host compromise — and the README says so.
 
 **Bounded blast radius.** `SESSION_MAX_AGE_DAYS` (default 30) purges stale sessions
-so a leaked DB can't yield indefinitely-live credentials. "Stale" is measured from
-the last *persist* (login or game switch) — the keep-alive ping and OTP fetches do
-not bump the timestamp — and the purge runs lazily on load (process restart /
-redeploy), not via a background timer. Logs are run through a redactor. OTPs and QR
-codes are sent **only** in 1:1 DMs, never a channel.
+so a leaked DB can't yield indefinitely-live credentials. It behaves as an idle
+timeout: any active use — login, game switch, or fetching an OTP — refreshes the
+session's timestamp, so only genuinely abandoned sessions expire (the background
+keep-alive ping doesn't count as use). The purge runs lazily on load (process
+restart / redeploy), not via a background timer. Logs are run through a redactor.
+OTPs and QR codes are sent **only** in 1:1 DMs, never a channel.
 
 **Access gating without forcing a shared server.** The gate exists only to stop
 strangers using *this host/IP* to run their own logins. It's DM-first by design: a

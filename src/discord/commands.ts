@@ -35,6 +35,9 @@ export const commands = [
         .setDescription('首次使用的存取碼(已授權者免填)')
         .setRequired(false),
     ),
+  new SlashCommandBuilder()
+    .setName('otp')
+    .setDescription('直接取得上次選擇的遊戲/帳號 OTP(免重跑選單)'),
   new SlashCommandBuilder().setName('logout').setDescription('登出並清除你的 Beanfun session'),
   new SlashCommandBuilder().setName('status').setDescription('查看你目前的登入狀態'),
   new SlashCommandBuilder()

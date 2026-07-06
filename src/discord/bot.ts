@@ -14,6 +14,7 @@ import {
   type Interaction,
 } from 'discord.js';
 
+import { FailureLockout } from '../core/guard.js';
 import { redactText } from '../core/redact.js';
 import { SessionManager } from '../core/sessionManager.js';
 import { createStore, type SessionStore } from '../core/store.js';
@@ -30,6 +31,8 @@ import {
   handleLogout,
   handleOtpDelete,
   handleOtpRefresh,
+  handleQuickOtp,
+  notifySessionExpired,
 } from './flow.js';
 import { CID, parseOtpRefresh } from './ids.js';
 import { formatUptime, startPresenceRotation } from './presence.js';
@@ -68,6 +71,18 @@ interface AccessControl {
 
 const MEMBER_CACHE_MS = 5 * 60_000;
 
+/**
+ * Online brute-force guard for the shared ACCESS_CODE. The constant-time compare
+ * removes the timing oracle; this removes unlimited guessing: 3 free misses per
+ * user, then 1 min lock doubling per further miss, capped at 1 h. In-memory —
+ * a restart resets it, which is fine for slowing an online attacker.
+ */
+const codeLockout = new FailureLockout({
+  freeAttempts: 3,
+  baseLockMs: 60_000,
+  maxLockMs: 3_600_000,
+});
+
 function parseAllowlist(raw: string | undefined): Set<string> {
   return new Set(
     (raw ?? '')
@@ -88,8 +103,6 @@ function safeEqual(a: string, b: string): boolean {
 export async function createBot(token: string): Promise<Client> {
   const store = createStore();
   const manager = new SessionManager(store);
-  const restored = await manager.restore();
-  if (restored > 0) console.log(`♻️  restored ${restored} session(s) from disk`);
 
   const access: AccessControl = {
     allowIds: parseAllowlist(process.env.ALLOWED_DISCORD_IDS),
@@ -144,6 +157,15 @@ export async function createBot(token: string): Promise<Client> {
     });
   });
 
+  // Tell the user when the keep-alive loop declares their session dead, so
+  // they relog on their own schedule instead of hitting a dead session later.
+  manager.onSessionExpired = (userId) => notifySessionExpired(client, userId);
+
+  // Restore before login: pings resume immediately, and any expiry notices fire
+  // only after the gateway is up (the ping interval is 60s, login takes ms).
+  const restored = await manager.restore();
+  if (restored > 0) console.log(`♻️  restored ${restored} session(s) from disk`);
+
   void client.login(token);
   return client;
 }
@@ -182,17 +204,33 @@ async function gateLogin(
 
   if (access.accessCode) {
     const supplied = interaction.options.getString('code')?.trim() ?? '';
+    // Locked out from earlier wrong guesses? Refuse before comparing, so a
+    // correct guess during the lock can't confirm the code either.
+    const lockedMs = codeLockout.lockedFor(interaction.user.id);
+    if (lockedMs > 0) {
+      await refuse(
+        interaction,
+        `存取碼錯誤次數過多,請 ${Math.ceil(lockedMs / 60_000)} 分鐘後再試。`,
+      );
+      return false;
+    }
     if (supplied && safeEqual(supplied, access.accessCode)) {
+      codeLockout.recordSuccess(interaction.user.id);
       access.enrolled.add(interaction.user.id);
       access.store?.enroll(interaction.user.id);
       return true;
     }
-    await refuse(
-      interaction,
-      supplied
-        ? '存取碼錯誤。請向管理者確認後再試:`/login code:<存取碼>`。'
-        : '這個 bot 需要存取碼。請用 `/login code:<存取碼>` 提供(只需第一次)。',
-    );
+    if (supplied) {
+      const lockMs = codeLockout.recordFailure(interaction.user.id);
+      await refuse(
+        interaction,
+        lockMs > 0
+          ? `存取碼錯誤。錯誤次數過多,已鎖定 ${Math.ceil(lockMs / 60_000)} 分鐘。`
+          : '存取碼錯誤。請向管理者確認後再試:`/login code:<存取碼>`。',
+      );
+      return false;
+    }
+    await refuse(interaction, '這個 bot 需要存取碼。請用 `/login code:<存取碼>` 提供(只需第一次)。');
     return false;
   }
 
@@ -232,6 +270,9 @@ async function dispatch(
         // /login is the enrollment entry point — it handles the access code.
         if (!(await gateLogin(access, interaction))) return;
         return handleLogin(manager, interaction);
+      case 'otp':
+        if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
+        return handleQuickOtp(manager, interaction);
       case 'logout':
         if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
         return void interaction.reply({

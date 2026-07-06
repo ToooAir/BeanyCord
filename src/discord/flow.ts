@@ -18,6 +18,7 @@ import {
   type BaseMessageOptions,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
+  type Client,
   type DMChannel,
   type Message,
   type StringSelectMenuInteraction,
@@ -32,12 +33,21 @@ import { pollQrLogin } from '../beanfun/login/qrPoll.js';
 import { getSessionKey } from '../beanfun/login/sessionKey.js';
 import { getOtp } from '../beanfun/otp.js';
 import type { ServiceAccount } from '../beanfun/types.js';
+import { Cooldown } from '../core/guard.js';
 import { safeError } from '../core/redact.js';
 import type { SessionManager, UserState } from '../core/sessionManager.js';
 import { CID, otpRefreshId, parseOtpRefresh } from './ids.js';
 
 const POLL_INTERVAL_MS = 2_000;
 const QR_TTL_MS = 150_000;
+/** Beanfun OTPs are valid for 3 minutes — after that the message's OTP block is
+ *  redacted in place (the nav buttons stay, so 🔄 regenerates). */
+const OTP_TTL_MS = 3 * 60_000;
+/** Min interval between OTP fetches per user; a fresh OTP is valid for minutes,
+ *  so rapid re-fetches are only ever accidental button spam. */
+const OTP_COOLDOWN_MS = 10_000;
+
+const otpCooldown = new Cooldown(OTP_COOLDOWN_MS);
 
 const errText = safeError;
 
@@ -484,6 +494,19 @@ async function deliverOtp(
       await write({ content: '你的登入已失效,請重新登入:', components: [reloginRow()] });
       return;
     }
+    // Fetch cooldown: a fresh OTP is valid for minutes, so a re-fetch within
+    // seconds is button spam — bounce it before touching the network.
+    const wait = otpCooldown.remaining(userId);
+    if (wait > 0) {
+      const m = await write({
+        content: `⏳ 才剛產生過 OTP,請 ${Math.ceil(wait / 1000)} 秒後再按 🔄。`,
+        components: [otpNavRow(sid)],
+      });
+      // Keep the single-control-surface invariant: this bounce message carries
+      // live buttons, so it must retire any previous OTP message's buttons.
+      await setActive(userId, m, 'otp');
+      return;
+    }
     try {
       const account = await resolveAccount(state, sid);
       if (!account) {
@@ -500,35 +523,27 @@ async function deliverOtp(
         state.session.serviceCode,
         state.session.serviceRegion,
       );
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(otpRefreshId(account.sid))
-          .setLabel('🔄 重新產生 OTP')
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId(CID.accountAgain)
-          .setLabel('👤 換帳號')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId(CID.gameAgain)
-          .setLabel('🎮 換遊戲')
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId(CID.otpDelete)
-          .setLabel('🗑 刪除')
-          .setStyle(ButtonStyle.Danger),
-      );
+      otpCooldown.touch(userId);
+      // Remember the account so `/otp` can skip the menus next time.
+      state.session.lastSid = account.sid;
       const gameLabel = state.session.serviceName ? `🎮 ${state.session.serviceName}\n` : '';
+      const header =
+        gameLabel +
+        `🔑 **${account.sname}** 的登入資訊\n` +
+        `帳號:\n\`\`\`\n${account.sid}\n\`\`\`\n`;
       const otpMsg = await write({
         content:
-          gameLabel +
-          `🔑 **${account.sname}** 的登入資訊\n` +
-          `帳號:\n\`\`\`\n${account.sid}\n\`\`\`\n` +
+          header +
           `OTP:\n\`\`\`\n${otp}\n\`\`\`\n` +
-          `-# ⚠️ 此 OTP 與按鈕會留在 DM 紀錄中,請勿外流;用完可按 🗑 刪除本訊息。`,
-        components: [row],
+          `-# ⚠️ OTP 有效 3 分鐘,到期會自動遮蔽;請勿外流,用完可按 🗑 刪除本訊息。`,
+        components: [otpNavRow(account.sid)],
       });
       await setActive(userId, otpMsg, 'otp'); // same message id -> just flips kind
+      scheduleOtpExpiry(
+        userId,
+        otpMsg,
+        header + `OTP:\n~~已失效(有效期 3 分鐘)~~\n-# 需要新的 OTP 請按 🔄。`,
+      );
       // Active use refreshes the stored session: persist the cookies rotated
       // during getOtp and bump updated_at so SESSION_MAX_AGE_DAYS behaves as an
       // idle timeout (only abandoned sessions expire). Best-effort — a persist
@@ -541,6 +556,45 @@ async function deliverOtp(
       });
     }
   });
+}
+
+/** The OTP message's nav row: refresh / switch account / switch game / delete. */
+function otpNavRow(sid: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(otpRefreshId(sid))
+      .setLabel('🔄 重新產生 OTP')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(CID.accountAgain)
+      .setLabel('👤 換帳號')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(CID.gameAgain)
+      .setLabel('🎮 換遊戲')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(CID.otpDelete)
+      .setLabel('🗑 刪除')
+      .setStyle(ButtonStyle.Danger),
+  );
+}
+
+// The OTP itself expires server-side after 3 minutes, but the DM message would
+// otherwise keep the (dead) code in history forever. Redact it in place when it
+// expires; keep the buttons so 🔄 still regenerates. One timer per user — a
+// refresh reuses the same message, so the previous timer is superseded.
+const otpExpireTimers = new Map<string, NodeJS.Timeout>();
+
+function scheduleOtpExpiry(userId: string, msg: Message, redactedContent: string): void {
+  const prev = otpExpireTimers.get(userId);
+  if (prev) clearTimeout(prev);
+  const t = setTimeout(() => {
+    otpExpireTimers.delete(userId);
+    // Message may have been deleted (🗑 / /clear) — best effort.
+    void msg.edit({ content: redactedContent }).catch(() => undefined);
+  }, OTP_TTL_MS);
+  otpExpireTimers.set(userId, t);
 }
 
 /**
@@ -565,6 +619,74 @@ async function resolveAccount(state: UserState, sid: string): Promise<ServiceAcc
   );
   state.accounts = accounts;
   return accounts.find((a) => a.sid === sid);
+}
+
+// ---- /otp (quick re-fetch) ---------------------------------------------------
+
+/**
+ * `/otp` — one-shot OTP for the last game + account this user picked, skipping
+ * the menus. Falls back to guidance when there's no session or no remembered
+ * pick. Secrets still only land in the 1:1 DM (same rule as /login).
+ */
+export async function handleQuickOtp(
+  manager: SessionManager,
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const userId = interaction.user.id;
+  const isPrivateDm = !interaction.inGuild() && interaction.channel?.type === ChannelType.DM;
+
+  let dm: DMChannel;
+  try {
+    dm = await interaction.user.createDM();
+  } catch {
+    await interaction.reply({
+      content: '我無法私訊你 — 請開啟「允許伺服器成員私訊」後再試。',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  let deliver: Deliver;
+  if (!isPrivateDm) {
+    await interaction.reply({ content: '已在你的私訊處理,請查看 DM。', flags: MessageFlags.Ephemeral });
+    deliver = (p) => dm.send(p);
+  } else {
+    deliver = makeReplyDeliver(interaction);
+  }
+
+  const state = manager.get(userId);
+  if (!state?.session) {
+    const m = await deliver({ content: '你尚未登入。請先登入:', components: [reloginRow()] });
+    await setActive(userId, m, 'menu');
+    return;
+  }
+  const sid = state.session.lastSid;
+  if (!sid || !state.session.serviceCode) {
+    const m = await deliver({
+      content: 'ℹ️ 還不知道要拿哪個帳號的 OTP — 先用 `/login` 選一次遊戲和帳號,之後 `/otp` 就能一鍵取得。',
+    });
+    await setActive(userId, m, 'menu');
+    return;
+  }
+  const msg = await deliver({ content: '⏳ 正在產生 OTP…' });
+  await deliverOtp(manager, userId, sid, async (p) => msg.edit(p));
+}
+
+// ---- session-expired notice --------------------------------------------------
+
+/**
+ * Proactive DM when the keep-alive loop declares a session dead (wired to
+ * `SessionManager.onSessionExpired`), so the user relogs on their own schedule
+ * instead of discovering the dead session at the next OTP attempt.
+ */
+export async function notifySessionExpired(client: Client, userId: string): Promise<void> {
+  const user = await client.users.fetch(userId);
+  const dm = await user.createDM();
+  const m = await dm.send({
+    content: '⚠️ 你的 Beanfun 登入已失效(保活偵測到連線中斷)。需要時請重新登入:',
+    components: [reloginRow()],
+  });
+  await setActive(userId, m, 'menu');
 }
 
 // ---- /logout, login cancel -------------------------------------------------

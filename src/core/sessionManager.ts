@@ -19,6 +19,11 @@ import type { SessionStore } from './store.js';
 /** WPF pingWorker cadence (#237): keep the server-side session warm every 60s. */
 const PING_INTERVAL_MS = 60_000;
 
+/** Consecutive keep-alive failures before we declare the session dead. One or
+ *  two failures are routinely transient (network blip, risk control); five in a
+ *  row (~5 min) means the server-side session is gone for real. */
+const PING_FAIL_THRESHOLD = 5;
+
 /** Minimal FIFO async mutex — chains tasks so only one runs at a time. */
 class Mutex {
   private tail: Promise<unknown> = Promise.resolve();
@@ -46,12 +51,22 @@ export interface UserState {
   pingTimer?: NodeJS.Timeout;
   /** Accounts from the last getAccounts, kept so an OTP pick can resolve a sid. */
   accounts?: ServiceAccount[];
+  /** Consecutive keep-alive ping failures (reset on any success). */
+  pingFails?: number;
 }
 
 export class SessionManager {
   private states = new Map<string, UserState>();
   private mutexes = new Map<string, Mutex>();
   private readonly store: SessionStore | null;
+
+  /**
+   * Called when a user's keep-alive has failed PING_FAIL_THRESHOLD times in a
+   * row and their session was dropped, so the front-end can tell the user
+   * proactively instead of letting them find out at the next OTP attempt.
+   * Set by the Discord layer; errors are swallowed.
+   */
+  onSessionExpired?: (userId: string) => Promise<void>;
 
   constructor(store: SessionStore | null = null) {
     this.store = store;
@@ -148,9 +163,25 @@ export class SessionManager {
     s.pingTimer = setInterval(() => {
       const st = this.states.get(userId);
       if (!st?.session) return;
-      // Swallow failures (transient network / risk control); retry next tick —
-      // mirrors the Rust ping loop which logs-and-continues.
-      void st.client.ping().catch(() => undefined);
+      // A single failure is transient (network / risk control) — retry next
+      // tick, mirroring the Rust ping loop. But a long unbroken run of failures
+      // means the server-side session is dead: drop it and notify, so the user
+      // doesn't discover the corpse at their next OTP attempt.
+      void st.client.ping().then(
+        () => {
+          st.pingFails = 0;
+        },
+        () => {
+          st.pingFails = (st.pingFails ?? 0) + 1;
+          if (st.pingFails >= PING_FAIL_THRESHOLD) {
+            console.warn(
+              `[session] keep-alive failed ${st.pingFails}x for ${userId} — dropping session`,
+            );
+            this.remove(userId);
+            void this.onSessionExpired?.(userId).catch(() => undefined);
+          }
+        },
+      );
     }, PING_INTERVAL_MS);
   }
 

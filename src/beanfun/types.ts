@@ -16,6 +16,9 @@ export interface Session {
    *  account messages stay self-explanatory. Optional (older persisted sessions
    *  won't have it). */
   serviceName?: string;
+  /** sid of the last account an OTP was issued for — UI-only, lets `/otp` skip
+   *  the game/account menus. Optional (older persisted sessions won't have it). */
+  lastSid?: string;
 }
 
 /** One row of the user's service-account list. Mirrors Rust `ServiceAccount`. */

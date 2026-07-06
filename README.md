@@ -13,6 +13,10 @@
   <a href="./README.zh-TW.md">繁體中文</a> · English
 </p>
 
+<p align="center">
+  <a href="https://github.com/ToooAir/BeanyCord/actions/workflows/ci.yml"><img src="https://github.com/ToooAir/BeanyCord/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 ---
 
 > **What this is, in one line:** Beanfun (now "Gama Play") game OTPs are normally
@@ -108,7 +112,11 @@ timeout: any active use — login, game switch, or fetching an OTP — refreshes
 session's timestamp, so only genuinely abandoned sessions expire (the background
 keep-alive ping doesn't count as use). The purge runs lazily on load (process
 restart / redeploy), not via a background timer. Logs are run through a redactor.
-OTPs and QR codes are sent **only** in 1:1 DMs, never a channel.
+OTPs and QR codes are sent **only** in 1:1 DMs, never a channel — and since a
+Beanfun OTP is only valid for 3 minutes, the OTP message **redacts itself in
+place** when that window closes, so DM history never accumulates live-looking
+codes. OTP fetches are also rate-limited per user (10s cooldown), keeping button
+spam off the upstream endpoint.
 
 **Access gating without forcing a shared server.** The gate exists only to stop
 strangers using *this host/IP* to run their own logins. It's DM-first by design: a
@@ -116,7 +124,9 @@ shared `ACCESS_CODE` is redeemed once via `/login code:<code>`, after which the
 user's id is **enrolled** (persisted) so they never re-enter it. Adding a friend is
 "hand them the code once" — no config edit, no restart, no mandatory guild
 membership. The code is compared in **constant time** (`crypto.timingSafeEqual`) to
-avoid leaking its length/prefix by timing. Optional `REQUIRED_GUILD_ID` and
+avoid leaking its length/prefix by timing, and guessing is throttled by a per-user
+**exponential lockout** (3 free misses, then 1 min doubling up to 1 h) so the code
+can't be brute-forced online either. Optional `REQUIRED_GUILD_ID` and
 `ALLOWED_DISCORD_IDS` gates exist for other deployment shapes.
 
 ## Engineering details worth calling out
@@ -139,6 +149,13 @@ avoid leaking its length/prefix by timing. Optional `REQUIRED_GUILD_ID` and
   a fixed 64-hex protocol constant left verbatim. Small infidelities here just fail.
 - **Crash-safe persistence.** A single corrupt/undecryptable session row is logged
   and dropped on load, never fatal — one bad blob can't block startup.
+- **Keep-alive death detection.** A single failed 60s ping is transient (network /
+  risk control) and just retries; **five consecutive** failures mean the server-side
+  session is really gone, so the bot drops it and proactively DMs the user a
+  re-login button instead of letting them discover the corpse at the next OTP.
+- **`/otp` fast path.** The last picked game + account ride along in the persisted
+  session, so the daily-driver case — same game, same account, one OTP a day —
+  is a single command with no menus.
 
 ## Tech stack
 

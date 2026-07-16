@@ -531,10 +531,15 @@ async function deliverOtp(
         gameLabel +
         `🔑 **${account.sname}** 的登入資訊\n` +
         `帳號:\n\`\`\`\n${account.sid}\n\`\`\`\n`;
+      // Discord renders <t:…:T> as local time and <t:…:R> as a live-updating
+      // relative time, so the message always shows when this OTP was generated.
+      const issuedAt = Math.floor(Date.now() / 1000);
+      const issuedLine = `-# 🕐 產生於 <t:${issuedAt}:T>(<t:${issuedAt}:R>)\n`;
       const otpMsg = await write({
         content:
           header +
           `OTP:\n\`\`\`\n${otp}\n\`\`\`\n` +
+          issuedLine +
           `-# ⚠️ OTP 有效 3 分鐘,到期會自動遮蔽;請勿外流,用完可按 🗑 刪除本訊息。`,
         components: [otpNavRow(account.sid)],
       });
@@ -542,7 +547,10 @@ async function deliverOtp(
       scheduleOtpExpiry(
         userId,
         otpMsg,
-        header + `OTP:\n~~已失效(有效期 3 分鐘)~~\n-# 需要新的 OTP 請按 🔄。`,
+        header +
+          `OTP:\n~~已失效(有效期 3 分鐘)~~\n` +
+          issuedLine +
+          `-# 需要新的 OTP 請按 🔄。`,
       );
       // Active use refreshes the stored session: persist the cookies rotated
       // during getOtp and bump updated_at so SESSION_MAX_AGE_DAYS behaves as an

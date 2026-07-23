@@ -62,15 +62,17 @@ async function step1Init(
   ensureSuccess(res, 'game_start_step2.aspx');
   const body = boundedText(res);
 
-  // The portal answers a killed session with a login page rather than a 4xx, so
-  // check before parsing — otherwise the HTML would surface as a parse error and
-  // leak the whole page into the user's DM.
-  if (looksLikeSessionExpiredPage(body)) {
-    throw new BeanfunError('otp.session_expired', 'login session no longer valid');
-  }
-
   const longPollingKey = extractLongPollingKey(body);
-  if (!longPollingKey) throw new BeanfunError('otp.missing_long_polling_key', body.slice(0, 256));
+  if (!longPollingKey) {
+    // A successful response is *also* HTML (the key is embedded in the page), so
+    // only treat this as an expired session once extraction has already failed:
+    // a killed session gets a login page rather than a 4xx, and dumping that raw
+    // page into the user's DM is what we're avoiding here.
+    if (looksLikeSessionExpiredPage(body)) {
+      throw new BeanfunError('otp.session_expired', 'login session no longer valid');
+    }
+    throw new BeanfunError('otp.missing_long_polling_key', body.slice(0, 256));
+  }
 
   // TW always parses the unk-data fragment.
   const unkData = extractUnkData(body);

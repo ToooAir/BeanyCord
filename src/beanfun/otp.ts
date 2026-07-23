@@ -18,6 +18,17 @@ import { decryptHex } from './wcdes.js';
 /** Fixed protocol constant on step 5 (`ppppp=`). Provenance unknown; do not edit. */
 const PPPPP = '1F552AEAFF976018F942B13690C990F60ED01510DDF89165F1658CCE7BC21DBA';
 
+/**
+ * A dead/hijacked session (e.g. someone re-logged in on another device and stole
+ * this session) makes the portal serve a full HTML login/error page — HTTP 200,
+ * so `ensureSuccess` passes — instead of the expected fragment. Detect that so
+ * callers can report "session expired" cleanly instead of dumping the raw page.
+ */
+export function looksLikeSessionExpiredPage(body: string): boolean {
+  const head = body.replace(/^﻿/, '').trimStart().slice(0, 512).toLowerCase();
+  return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<html');
+}
+
 interface Step1 {
   longPollingKey: string;
   unkData: [string, string] | null;
@@ -50,6 +61,13 @@ async function step1Init(
   });
   ensureSuccess(res, 'game_start_step2.aspx');
   const body = boundedText(res);
+
+  // The portal answers a killed session with a login page rather than a 4xx, so
+  // check before parsing — otherwise the HTML would surface as a parse error and
+  // leak the whole page into the user's DM.
+  if (looksLikeSessionExpiredPage(body)) {
+    throw new BeanfunError('otp.session_expired', 'login session no longer valid');
+  }
 
   const longPollingKey = extractLongPollingKey(body);
   if (!longPollingKey) throw new BeanfunError('otp.missing_long_polling_key', body.slice(0, 256));

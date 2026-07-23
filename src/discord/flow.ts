@@ -26,6 +26,7 @@ import {
 
 import { getAccounts } from '../beanfun/account.js';
 import type { BeanfunClient } from '../beanfun/client.js';
+import { BeanfunError } from '../beanfun/errors.js';
 import { listGames } from '../beanfun/games.js';
 import { finalizeQrLogin } from '../beanfun/login/qrFinalize.js';
 import { initQrLogin } from '../beanfun/login/qrInit.js';
@@ -558,12 +559,40 @@ async function deliverOtp(
       // failure must not turn an already-delivered OTP into an error.
       await manager.persist(userId).catch(() => undefined);
     } catch (e) {
-      await write({
-        content: `❌ 取得 OTP 失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
-        components: [reloginRow()],
-      });
+      await write(otpFailureMessage(e));
     }
   });
+}
+
+/** Error codes that mean the Beanfun session itself is gone (not a transient
+ *  hiccup) — usually because a login elsewhere hijacked this session. */
+function isSessionDead(e: unknown): boolean {
+  return (
+    e instanceof BeanfunError &&
+    (e.code === 'otp.session_expired' || e.code === 'login.missing_session_key')
+  );
+}
+
+/** Build a clean, user-facing message for an OTP fetch failure. A dead session
+ *  gets a dedicated explainer; anything else shows a short redacted reason —
+ *  never the raw server body (which can be a full HTML login page). */
+function otpFailureMessage(e: unknown): BaseMessageOptions {
+  if (isSessionDead(e)) {
+    return {
+      content:
+        '🔒 **登入已失效**\n' +
+        '你的 Beanfun 連線已被中止,通常是因為這個帳號在其他裝置重新登入、搶走了原本的登入階段。\n\n' +
+        '請重新登入以繼續使用 👇',
+      components: [reloginRow()],
+    };
+  }
+  return {
+    content:
+      '❌ **取得 OTP 失敗**\n' +
+      `原因:\`${errText(e)}\`\n\n` +
+      '-# 若持續失敗,可能是登入已失效,請重新登入。',
+    components: [reloginRow()],
+  };
 }
 
 /** The OTP message's nav row: refresh / switch account / switch game / delete. */

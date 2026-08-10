@@ -18,6 +18,7 @@ import { FailureLockout } from '../core/guard.js';
 import { redactText } from '../core/redact.js';
 import { SessionManager } from '../core/sessionManager.js';
 import { createStore, type SessionStore } from '../core/store.js';
+import { isBotDm } from './context.js';
 import {
   handleAccountSelect,
   handleChangeAccount,
@@ -154,6 +155,9 @@ export async function createBot(token: string): Promise<Client> {
   client.on('interactionCreate', (interaction: Interaction) => {
     void dispatch(access, manager, interaction).catch((e: unknown) => {
       console.error('interaction error:', redactText(e instanceof Error ? e.message : String(e)));
+      // Never leave the user staring at a "⏳ …" placeholder that will never be
+      // filled in: a failed flow must surface as a visible (ephemeral) message.
+      void notifyFailure(interaction);
     });
   });
 
@@ -188,6 +192,25 @@ async function refuse(interaction: Interaction, content: string): Promise<void> 
     await interaction.reply({ content, flags: MessageFlags.Ephemeral });
   } catch {
     /* nothing more we can do */
+  }
+}
+
+/**
+ * Last-resort user-facing error for a flow that threw. Uses followUp when the
+ * interaction was already answered — that goes through the webhook route, so it
+ * lands even in a channel the bot has no access to. Best-effort by design.
+ */
+async function notifyFailure(interaction: Interaction): Promise<void> {
+  if (!interaction.isRepliable()) return;
+  const content = '⚠️ 這個操作沒有完成(內部錯誤)。請稍後再試一次,或用 `/login` 重新開始。';
+  try {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
+    } else {
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    }
+  } catch {
+    /* the interaction token may already be dead; nothing more we can do */
   }
 }
 
@@ -277,7 +300,7 @@ async function dispatch(
         if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
         return void interaction.reply({
           content: handleLogout(manager, interaction.user.id),
-          flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined,
+          flags: isBotDm(interaction) ? undefined : MessageFlags.Ephemeral,
         });
       case 'status': {
         if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
@@ -290,7 +313,7 @@ async function dispatch(
         )}。`;
         return void interaction.reply({
           content: `${mine}\n${stats}`,
-          flags: interaction.inGuild() ? MessageFlags.Ephemeral : undefined,
+          flags: isBotDm(interaction) ? undefined : MessageFlags.Ephemeral,
         });
       }
       case 'clear':

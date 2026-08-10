@@ -11,7 +11,6 @@ import {
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
   EmbedBuilder,
   MessageFlags,
   StringSelectMenuBuilder,
@@ -37,6 +36,7 @@ import type { ServiceAccount } from '../beanfun/types.js';
 import { Cooldown } from '../core/guard.js';
 import { safeError } from '../core/redact.js';
 import type { SessionManager, UserState } from '../core/sessionManager.js';
+import { isBotDm } from './context.js';
 import { CID, otpRefreshId, parseOtpRefresh } from './ids.js';
 
 const POLL_INTERVAL_MS = 2_000;
@@ -100,9 +100,10 @@ export async function handleLogin(
 ): Promise<void> {
   const userId = interaction.user.id;
   // Only a 1:1 DM with the bot is private enough to host the QR inline. A guild
-  // channel OR a *group* DM (possible with user-install) would expose the QR to
-  // others, so for those we deliver everything to the user's 1:1 DM instead.
-  const isPrivateDm = !interaction.inGuild() && interaction.channel?.type === ChannelType.DM;
+  // channel, a group DM, or someone else's DM (both possible with user-install)
+  // would expose the QR to others — and the bot can't even edit its own messages
+  // there — so for those we deliver everything to the user's 1:1 DM instead.
+  const isPrivateDm = isBotDm(interaction);
 
   let dm: DMChannel;
   try {
@@ -670,7 +671,7 @@ export async function handleQuickOtp(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   const userId = interaction.user.id;
-  const isPrivateDm = !interaction.inGuild() && interaction.channel?.type === ChannelType.DM;
+  const isPrivateDm = isBotDm(interaction);
 
   let dm: DMChannel;
   try {

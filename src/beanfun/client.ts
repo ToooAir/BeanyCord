@@ -85,15 +85,40 @@ export class BeanfunClient {
   }
 
   /** Session keep-alive. Mirrors Rust `BeanfunClient::ping` (WPF pingWorker):
-   *  GET `echo_token.ashx?webtoken=1` on the portal host. Throws on non-2xx;
-   *  the caller's 60s loop swallows failures and retries next tick. */
+   *  GET `echo_token.ashx?webtoken=1` on the portal host. Throws on non-2xx or
+   *  on a body that says the session is logged out; the caller's 60s loop
+   *  swallows failures and retries next tick. */
   async ping(): Promise<void> {
     const res = await this.http.get(
       `${TW.portalBase}beanfun_block/generic_handlers/echo_token.ashx`,
       { searchParams: { webtoken: '1' } },
     );
     ensureSuccess(res, 'echo_token.ashx');
+    if (isLoggedOutEcho(boundedText(res))) {
+      throw new BeanfunError('session.logged_out', 'echo_token.ashx reports the session is logged out');
+    }
   }
+}
+
+/**
+ * Whether an `echo_token.ashx` body says the session is gone.
+ *
+ * The endpoint answers **HTTP 200 even for a dead session**, e.g.
+ * `BeanFunBlock.EchoTokenResult({ResultCode:0, ResultDesc: "User is logged out.",
+ * MainAccountID : "" });` — so the status code alone says nothing about
+ * liveness. WPF and the Rust port ignore this body on purpose (they only want
+ * the inactivity-timer reset, see `client.rs` "Ignores the response body"), but
+ * BeanyCord layers a death detector on the ping, so it has to read it.
+ *
+ * Deliberately conservative: only a body that *parses* and echoes an empty
+ * `MainAccountID` counts as dead — the endpoint's whole job is echoing the
+ * logged-in account, so a live session always has one. An unrecognised body is
+ * treated as alive, which means a future format change can at worst make the
+ * detector silent again, never mass-kill live sessions.
+ */
+export function isLoggedOutEcho(body: string): boolean {
+  const m = /MainAccountID\s*:\s*"([^"]*)"/i.exec(body);
+  return m?.[1]?.trim() === '';
 }
 
 /** Throw on non-2xx, mirroring Rust `ensure_success`. */

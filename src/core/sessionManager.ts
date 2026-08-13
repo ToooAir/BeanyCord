@@ -171,11 +171,12 @@ export class SessionManager {
         () => {
           st.pingFails = 0;
         },
-        () => {
+        (e) => {
           st.pingFails = (st.pingFails ?? 0) + 1;
           if (st.pingFails >= PING_FAIL_THRESHOLD) {
             console.warn(
-              `[session] keep-alive failed ${st.pingFails}x for ${userId} — dropping session`,
+              `[session] keep-alive failed ${st.pingFails}x for ${userId} — dropping session:`,
+              safeError(e),
             );
             this.remove(userId);
             void this.onSessionExpired?.(userId).catch(() => undefined);

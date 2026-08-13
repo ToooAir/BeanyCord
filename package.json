@@ -25,7 +25,7 @@
     "got": "^14.4.5",
     "he": "^1.2.0",
     "https-proxy-agent": "^7.0.6",
-    "tough-cookie": "^5.1.2"
+    "tough-cookie": "^6.0.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

@@ -347,10 +347,16 @@ export async function handleGameSelect(
       );
       await setActive(userId, accMsg, 'menu'); // deletes the "載入中" game-menu msg
     } catch (e) {
-      await dm.send({
-        content: `❌ 載入帳號失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
-        components: [reloginRow()],
-      });
+      // Same rule as the OTP path: a server-side death drops the session here
+      // too, so /status and the keep-alive stop reporting a corpse as live.
+      await dm.send(
+        dropIfSessionDead(manager, userId, e)
+          ? sessionDeadMessage()
+          : {
+              content: `❌ 載入帳號失敗:${errText(e)}\n若持續失敗,可能是登入已失效,請重新登入:`,
+              components: [reloginRow()],
+            },
+      );
     }
   });
 }
@@ -484,7 +490,7 @@ export async function handleOtpDelete(interaction: ButtonInteraction): Promise<v
   }
 }
 
-async function deliverOtp(
+export async function deliverOtp(
   manager: SessionManager,
   userId: string,
   sid: string,
@@ -560,6 +566,7 @@ async function deliverOtp(
       // failure must not turn an already-delivered OTP into an error.
       await manager.persist(userId).catch(() => undefined);
     } catch (e) {
+      dropIfSessionDead(manager, userId, e);
       await write(otpFailureMessage(e));
     }
   });
@@ -574,19 +581,36 @@ function isSessionDead(e: unknown): boolean {
   );
 }
 
+/**
+ * Drop a session the server has already killed. Announcing the death is not
+ * enough: while the state lingers, /status keeps reporting the corpse as a live
+ * session, the 60s keep-alive keeps pinging it until PING_FAIL_THRESHOLD trips
+ * (~5 min later, producing a second, contradictory notice), and restore() brings
+ * it back on the next restart. Returns whether the session was in fact dead.
+ */
+function dropIfSessionDead(manager: SessionManager, userId: string, e: unknown): boolean {
+  if (!isSessionDead(e)) return false;
+  // remove() takes no lock, so this is safe inside a withLock callback.
+  manager.remove(userId);
+  return true;
+}
+
+/** The dedicated explainer for a session that was killed server-side. */
+function sessionDeadMessage(): BaseMessageOptions {
+  return {
+    content:
+      '🔒 **登入已失效**\n' +
+      '你的 Beanfun 連線已被中止,通常是因為這個帳號在其他裝置重新登入、搶走了原本的登入階段。\n\n' +
+      '請重新登入以繼續使用 👇',
+    components: [reloginRow()],
+  };
+}
+
 /** Build a clean, user-facing message for an OTP fetch failure. A dead session
  *  gets a dedicated explainer; anything else shows a short redacted reason —
  *  never the raw server body (which can be a full HTML login page). */
 function otpFailureMessage(e: unknown): BaseMessageOptions {
-  if (isSessionDead(e)) {
-    return {
-      content:
-        '🔒 **登入已失效**\n' +
-        '你的 Beanfun 連線已被中止,通常是因為這個帳號在其他裝置重新登入、搶走了原本的登入階段。\n\n' +
-        '請重新登入以繼續使用 👇',
-      components: [reloginRow()],
-    };
-  }
+  if (isSessionDead(e)) return sessionDeadMessage();
   return {
     content:
       '❌ **取得 OTP 失敗**\n' +

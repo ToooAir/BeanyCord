@@ -25,6 +25,7 @@ import { pollQrLogin } from './beanfun/login/qrPoll.js';
 import { getSessionKey } from './beanfun/login/sessionKey.js';
 import { getOtp } from './beanfun/otp.js';
 import type { Session } from './beanfun/types.js';
+import { createStore } from './core/store.js';
 
 const QR_POLL_INTERVAL_MS = 2_000;
 const QR_MAX_WAIT_MS = 150_000;
@@ -94,12 +95,31 @@ async function main(): Promise<void> {
     console.log(`  ${i + 1}. ${a.sname}  (sid=${a.sid}, ssn=${a.ssn})`),
   );
   const account = accounts[await pickIndex('帳號', accounts.length)]!;
+  session.lastSid = account.sid;
+
+  // Optional: hand this session to the dev tooling (`npm run capture`) so the
+  // dead-session response shapes can be captured for real instead of assumed.
+  if (process.argv.includes('--persist')) await persistSession(client, session);
 
   // 4) OTP
   console.log('\n=== 步驟 4/4：取得 OTP ===');
   const otp = await getOtp(client, session, account, session.serviceCode, session.serviceRegion);
   console.log(`\n🔑 OTP: ${otp}\n`);
   console.log('M0 成功 — 協定鏈、WCDES、與此主機 IP 全部通過驗證。');
+}
+
+/** Write the live session into the same encrypted store the bot uses, under a
+ *  dedicated slot id so it can never collide with a real Discord user. */
+async function persistSession(client: BeanfunClient, session: Session): Promise<void> {
+  const store = createStore();
+  if (!store) {
+    console.log('(--persist 略過:未設定 SESSION_ENCRYPTION_KEY)');
+    return;
+  }
+  const slot = process.env.CAPTURE_USER_ID?.trim() || 'm0-capture';
+  store.save(slot, { session, cookies: await client.jar.serialize() });
+  store.close();
+  console.log(`(--persist 已將 session 寫入 slot "${slot}" — 用 npm run capture 抓取回應)`);
 }
 
 async function waitForQrApproval(

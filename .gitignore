@@ -8,5 +8,9 @@ qr.png
 *.db
 data/
 
+# Raw endpoint captures (npm run capture): contain bfWebToken, account ids and
+# character names. Scrub by hand before promoting anything to test/fixtures/.
+capture/
+
 # Internal AI planning notes — contain local paths / session metadata; never publish
 docs/memory/

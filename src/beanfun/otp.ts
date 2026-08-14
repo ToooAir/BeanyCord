@@ -149,12 +149,32 @@ async function step5GetOtp(
   return boundedText(res);
 }
 
+/** Longest server rejection text we're willing to relay to the user verbatim. */
+const MAX_REJECTION_CHARS = 120;
+
+/**
+ * Step 5 has a defined success shape (`1;<key8><cipherHex>`), so anything else
+ * is a rejection — and the slot that normally holds a short reason ("帳號狀態
+ * 異常" and friends) can just as well hold a whole error page, which is how raw
+ * markup ended up in a user's DM. That is the half of the `889a820` fix that was
+ * left undone: step 1 stopped leaking its body, step 5 never did.
+ *
+ * So relay a reason only when it still looks like one — short, single-line, no
+ * markup. Otherwise report the shape violation and keep the body out of it.
+ * Nothing is lost: the real reason was never in an error page anyway.
+ */
+function rejectionReason(raw: string): string {
+  const msg = raw.trim();
+  const unusable = msg === '' || msg.length > MAX_REJECTION_CHARS || /[<>\r\n]/.test(msg);
+  return unusable ? 'get_webstart_otp.ashx returned an unexpected response shape' : msg;
+}
+
 /** Step 6 — `1;<key8><cipherHex>` -> DES decrypt -> trim NULs. */
 export function decryptEnvelope(envelope: string): string {
   if (envelope === '') throw new BeanfunError('otp.empty_response', 'empty OTP envelope');
   const parts = envelope.split(';');
   if (parts.length < 2) throw new BeanfunError('otp.empty_response', 'unparseable OTP envelope');
-  if (parts[0] !== '1') throw new BeanfunError('otp.server_rejected', parts[1] ?? '');
+  if (parts[0] !== '1') throw new BeanfunError('otp.server_rejected', rejectionReason(parts[1] ?? ''));
   const payload = parts[1]!;
   if (payload.length < 8) throw new BeanfunError('otp.decryption_failed', 'payload too short for 8-byte key');
   const key = payload.slice(0, 8);

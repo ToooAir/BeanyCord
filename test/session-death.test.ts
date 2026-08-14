@@ -43,13 +43,18 @@ const SESSION: Session = {
   serviceRegion: 'region',
 };
 
-/** Minimal stand-in for BeanfunClient: every GET answers 200 + `body`. */
-function clientReturning(body: string): BeanfunClient {
+/** Minimal stand-in for BeanfunClient: every GET answers 200 + `body`. `ping`
+ *  stands in for echo_token, which the Discord layer consults to confirm a death
+ *  before dropping anything. */
+function clientReturning(body: string, ping: () => Promise<void> = async () => {}): BeanfunClient {
   return {
     readBfWebToken: async () => 'token',
+    ping,
     http: { get: async () => ({ statusCode: 200, body, url: 'https://tw.beanfun.com/' }) },
   } as unknown as BeanfunClient;
 }
+
+const pingSaysLoggedOut = () => Promise.reject(new BeanfunError('session.logged_out', 'gone'));
 
 describe('a login page must never look like an empty result', () => {
   it('getAccounts throws session.expired instead of reporting zero accounts', async () => {
@@ -93,7 +98,7 @@ describe('beginLogin — session death', () => {
     const manager = new SessionManager();
     manager.getOrCreate('u1').session = SESSION;
     // The resumed session is dead: the game-catalogue fetch proves it.
-    manager.get('u1')!.client = clientReturning(LOGIN_PAGE);
+    manager.get('u1')!.client = clientReturning(LOGIN_PAGE, pingSaysLoggedOut);
 
     const sent: string[] = [];
     const deliver = vi.fn(async (p: { content?: string }) => {
@@ -107,6 +112,25 @@ describe('beginLogin — session death', () => {
     expect(sent.join('')).toContain('登入已失效');
     expect(manager.isLoggedIn('u1')).toBe(false);
     expect(manager.activeSessionCount()).toBe(0);
+  });
+
+  it('keeps the session when echo_token contradicts the death signal', async () => {
+    const manager = new SessionManager();
+    manager.getOrCreate('u3').session = SESSION;
+    // The catalogue says "session expired" but the keep-alive endpoint disagrees.
+    manager.get('u3')!.client = clientReturning(LOGIN_PAGE);
+
+    const sent: string[] = [];
+    const deliver = vi.fn(async (p: { content?: string }) => {
+      sent.push(String(p.content));
+      return { id: 'm3' } as Message;
+    });
+
+    const { beginLogin } = await import('../src/discord/flow.js');
+    await beginLogin(manager, 'u3', {} as DMChannel, deliver as never);
+
+    expect(sent.join('')).toContain('登入仍然有效');
+    expect(manager.isLoggedIn('u3')).toBe(true);
   });
 
   it('keeps the session when the catalogue fetch fails transiently', async () => {

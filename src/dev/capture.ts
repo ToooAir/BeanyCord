@@ -26,8 +26,14 @@ import { join } from 'node:path';
 import 'dotenv/config';
 import { CookieJar } from 'tough-cookie';
 
-import { BeanfunClient, isLoggedOutEcho, looksLikeSessionExpiredPage } from '../beanfun/client.js';
+import {
+  BeanfunClient,
+  isLoggedOutEcho,
+  isSessionExpiredMessagePage,
+  looksLikeSessionExpiredPage,
+} from '../beanfun/client.js';
 import { TW } from '../beanfun/endpoints.js';
+import { extractLongPollingKey, extractServiceAccounts } from '../beanfun/parser.js';
 import { redactText, redactUrl } from '../core/redact.js';
 import { createStore } from '../core/store.js';
 import type { Session } from '../beanfun/types.js';
@@ -140,6 +146,7 @@ async function main(): Promise<void> {
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
 
   const rows: string[] = [];
+  let accountListBody = '';
   for (const p of probes(session, liveToken)) {
     if (p.needsGame && (!session.serviceCode || !session.serviceRegion)) {
       console.log(`  - ${p.name}: SKIPPED (persisted session has no game selected)`);
@@ -148,6 +155,7 @@ async function main(): Promise<void> {
     try {
       const res = await client.http.get(p.url, p.searchParams ? { searchParams: p.searchParams } : {});
       const body = typeof res.body === 'string' ? res.body : String(res.body ?? '');
+      if (p.name === 'game_server_account_list.aspx') accountListBody = body;
       writeFileSync(join(outDir, `${p.name}.txt`), body, { mode: 0o600 });
       const line = `${p.name}: HTTP ${res.statusCode}, ${Buffer.byteLength(body)} bytes -> ${verdict(p.name, body)}`;
       rows.push(line);
@@ -158,6 +166,44 @@ async function main(): Promise<void> {
       const line = `${p.name}: THREW ${e instanceof Error ? redactText(e.message) : String(e)}`;
       rows.push(line);
       console.log(`  - ${line}`);
+    }
+  }
+
+  // OTP step 1 needs an account's `ssn`, which only exists once the account list
+  // has been read — so it can't be a static probe. This is the step the user
+  // actually hits when their session is dead, and the one place we still infer
+  // the failure shape rather than having captured it.
+  if (accountListBody && session.serviceCode && session.serviceRegion) {
+    const first = extractServiceAccounts(accountListBody)[0];
+    if (!first) {
+      console.log('  - game_start_step2.aspx: SKIPPED (no account rows to derive sotp from)');
+    } else {
+      try {
+        const res = await client.http.get(
+          `${TW.portalBase}beanfun_block/game_zone/game_start_step2.aspx`,
+          {
+            searchParams: {
+              service_code: session.serviceCode,
+              service_region: session.serviceRegion,
+              sotp: first.ssn,
+              dt: String(Date.now()),
+            },
+          },
+        );
+        const body = typeof res.body === 'string' ? res.body : String(res.body ?? '');
+        writeFileSync(join(outDir, 'game_start_step2.aspx.txt'), body, { mode: 0o600 });
+        const key = extractLongPollingKey(body);
+        const line =
+          `game_start_step2.aspx: HTTP ${res.statusCode}, ${Buffer.byteLength(body)} bytes -> ` +
+          `longPollingKey=${key ? 'FOUND' : 'missing'}, ` +
+          `${looksLikeSessionExpiredPage(body) ? 'html-page' : 'not-html'}, ` +
+          `${isSessionExpiredMessagePage(body) ? 'DEATH-NOTICE' : 'no-death-notice'}`;
+        rows.push(line);
+        console.log(`  - ${line}`);
+        console.log(`      head:      ${redactText(body.slice(0, 160)).replace(/\s+/g, ' ')}`);
+      } catch (e) {
+        console.log(`  - game_start_step2.aspx: THREW ${e instanceof Error ? redactText(e.message) : String(e)}`);
+      }
     }
   }
 

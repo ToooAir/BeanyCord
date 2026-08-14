@@ -1,0 +1,55 @@
+﻿<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" >
+<head>
+    <!-- + 增加響應式 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+	
+    <title>Err Msg</title>
+    <script type="text/javascript" src="../scripts/disable_keydown.js"></script>
+	
+	<!-- + 增加自定義的手機板CSS -->
+    <link rel="stylesheet" href="https://tw.hicdn.beanfun.com/beanfun/beanfun/bfm/css/bfm-err-page.css">
+    <!-- + 增加自定義表頭用的JS -->
+    <script src="https://tw.hicdn.beanfun.com/beanfun/beanfun/bfm//js/bfm-header.js"></script>
+    <!-- + 增加自定義footer用的JS -->
+    <script src="https://tw.hicdn.beanfun.com/beanfun/beanfun/bfm/js/bfm-footer.js"></script>
+	
+    <style type="text/css">
+      body {font-size:12px; background:#ffffff url('../images/bulletin/news_popwindow_bg.gif') bottom right no-repeat;}
+    </style>
+</head>
+<body scroll="no" onload="ProcessOnload();">
+
+            <table width="100%" height="490">
+              <tr>
+                <td align="center" valign="middle">
+                  <h3>程式發生錯誤</h3>
+                  <p>
+                    您可以<a href="https://tw.beanfun.com/">回前頁</a>
+                    <br /><br />
+                    若持續有此錯誤訊息發生，請通知客服中心。
+                  </p>
+                  <br />
+                  <div id="divErrorMsg"></div>
+                </td>
+              </tr>
+            </table>
+
+<script src="err_msg_js.ashx"></script>
+<script type="text/javascript">     
+
+  function ProcessOnload()
+  {
+//    if (DebugMode)
+//    {
+//        document.getElementById("divErrorMsg").innerHTML = ErrMsg + "<br /><br />";
+//        document.getElementById("divErrorMsg").innerHTML += "<a href='ShowErrorLog.aspx' target='_blank'>查詢log</a>" ;
+//    }    
+  }
+  
+  document.oncontextmenu = new Function("return false");						
+</script>
+
+
+</body>
+</html>

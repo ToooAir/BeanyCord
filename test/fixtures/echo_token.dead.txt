@@ -1,0 +1,1 @@
+BeanFunBlock.EchoTokenResult({ResultCode:0, ResultDesc: "User is logged out.", MainAccountID : "bfguestREDACTED" });

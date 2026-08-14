@@ -1,37 +1,48 @@
 /**
- * The keep-alive death detector used to be blind: `echo_token.ashx` answers
- * HTTP 200 even when the session is gone, and ping() only checked the status
- * code, so pingFails never incremented and the "session expired" notice could
- * never fire. The logged-out body below was captured from the live TW portal
- * with an empty cookie jar (2026-08-13).
+ * Keep-alive death detection, against bodies captured from the live TW portal
+ * (test/fixtures/, 2026-08-14) — the SAME session before and after it was killed
+ * by a login elsewhere. That matched pair is the whole point: the two responses
+ * are byte-identical apart from ResultCode/ResultDesc, which is how we learned
+ * the first version of this check was reading a field that carries no signal.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { isLoggedOutEcho } from '../src/beanfun/client.js';
 
-const LOGGED_OUT =
-  'BeanFunBlock.EchoTokenResult({ResultCode:0, ResultDesc: "User is logged out.", MainAccountID : "" });';
+const fixture = (name: string): string =>
+  readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8');
+
+const ALIVE = fixture('echo_token.alive.txt');
+const DEAD = fixture('echo_token.dead.txt');
 
 describe('isLoggedOutEcho', () => {
-  it('detects the captured logged-out response', () => {
-    expect(isLoggedOutEcho(LOGGED_OUT)).toBe(true);
+  it('reads the captured live session as alive', () => {
+    expect(isLoggedOutEcho(ALIVE)).toBe(false);
   });
 
-  it('treats an echoed account id as alive', () => {
-    const alive =
-      'BeanFunBlock.EchoTokenResult({ResultCode:1, ResultDesc: "", MainAccountID : "AB12345678" });';
-    expect(isLoggedOutEcho(alive)).toBe(false);
+  it('reads the captured dead session as logged out', () => {
+    expect(isLoggedOutEcho(DEAD)).toBe(true);
   });
 
-  it('tolerates whitespace / quoting variants around the field', () => {
-    expect(isLoggedOutEcho('{MainAccountID:""}')).toBe(true);
-    expect(isLoggedOutEcho('{ mainaccountid  :   "   " }')).toBe(true);
-    expect(isLoggedOutEcho('{ MainAccountID : "  X  " }')).toBe(false);
+  it('does not depend on MainAccountID, which is identical in both states', () => {
+    // Regression guard: the first version keyed off an empty MainAccountID and
+    // was blind, because a dead session still echoes a bfguest id.
+    const idOf = (s: string) => /MainAccountID\s*:\s*"([^"]*)"/.exec(s)?.[1];
+    expect(idOf(ALIVE)).toBe(idOf(DEAD));
+    expect(idOf(DEAD)).not.toBe('');
+  });
+
+  it('accepts either signal on its own', () => {
+    expect(isLoggedOutEcho('{ResultCode:0}')).toBe(true);
+    expect(isLoggedOutEcho('{ResultDesc: "User is logged out."}')).toBe(true);
+    expect(isLoggedOutEcho('{ResultCode:1}')).toBe(false);
   });
 
   it('fails open on an unrecognised body so a format change cannot mass-kill sessions', () => {
     expect(isLoggedOutEcho('')).toBe(false);
     expect(isLoggedOutEcho('<html>totally different</html>')).toBe(false);
-    expect(isLoggedOutEcho('BeanFunBlock.EchoTokenResult({ResultCode:0});')).toBe(false);
   });
 });

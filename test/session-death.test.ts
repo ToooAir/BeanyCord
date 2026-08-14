@@ -9,6 +9,9 @@
  *  - beginLogin  -> announced the death without dropping the session, leaving a
  *                   ghost in /status (the same defect as deliverOtp had)
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { getAccounts } from '../src/beanfun/account.js';
@@ -19,9 +22,17 @@ import { SessionManager } from '../src/core/sessionManager.js';
 import type { DMChannel, Message } from 'discord.js';
 import type { Session } from '../src/beanfun/types.js';
 
-const LOGIN_PAGE =
-  '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN">\n' +
-  '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>登入</title></head><body></body></html>';
+/** The portal's real "尚未登入" message page, captured from a dead session. */
+const LOGIN_PAGE = readFileSync(
+  fileURLToPath(new URL('./fixtures/account_list.session-expired.txt', import.meta.url)),
+  'utf8',
+);
+
+/** A perfectly ordinary HTML page that is NOT a death notice — e.g. a game the
+ *  user genuinely has no accounts for. Must never be read as session death. */
+const EMPTY_BUT_ALIVE =
+  '<!DOCTYPE html><html><head><title>Account List</title></head>' +
+  '<body><div id="divAccountList"></div></body></html>';
 
 const SESSION: Session = {
   region: 'TW',
@@ -51,6 +62,15 @@ describe('a login page must never look like an empty result', () => {
     await expect(listGames(clientReturning(LOGIN_PAGE))).rejects.toMatchObject({
       code: 'session.expired',
     });
+  });
+
+  it('does NOT call a game with zero accounts a dead session', async () => {
+    // The check that made this safe: "is it HTML?" was true of the successful
+    // account list too, so a legitimately empty game would have been reported
+    // as "登入已失效".
+    await expect(
+      getAccounts(clientReturning(EMPTY_BUT_ALIVE), SESSION, 'code', 'region'),
+    ).resolves.toMatchObject({ accounts: [] });
   });
 
   it('keeps the original parse error when the body is not a login page', async () => {

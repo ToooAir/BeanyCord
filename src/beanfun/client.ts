@@ -117,8 +117,12 @@ export class BeanfunClient {
  * detector silent again, never mass-kill live sessions.
  */
 export function isLoggedOutEcho(body: string): boolean {
-  const m = /MainAccountID\s*:\s*"([^"]*)"/i.exec(body);
-  return m?.[1]?.trim() === '';
+  // ResultDesc is the human-readable verdict; ResultCode 0/1 is the same answer
+  // in numeric form. Either one alone is enough — captured live, both states are
+  // byte-identical apart from these two fields.
+  if (/ResultDesc\s*:\s*"[^"]*logged\s*out/i.test(body)) return true;
+  const code = /ResultCode\s*:\s*(\d+)/i.exec(body)?.[1];
+  return code === '0';
 }
 
 /**
@@ -138,11 +142,25 @@ export function looksLikeSessionExpiredPage(body: string): boolean {
   return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<html');
 }
 
+/**
+ * The portal's "Messge Page" (their typo) — a tiny HTML shell whose only content
+ * is `<div id="divMsg">尚未登入，請重新登入</div>`. Captured from a real dead
+ * session; a live response never carries it.
+ *
+ * This is deliberately narrower than `looksLikeSessionExpiredPage`, which only
+ * really asks "is this HTML?" — true of the *successful* account list and game
+ * catalogue too. Using that as a general death test would report "session
+ * expired" for a game where the user genuinely has zero accounts.
+ */
+export function isSessionExpiredMessagePage(body: string): boolean {
+  return /id="divMsg"[^>]*>\s*尚未登入/.test(body);
+}
+
 /** Throw the canonical session-death error if `body` proves the session is gone.
  *  Call this wherever an empty/unparseable result could just mean "logged out". */
 export function assertSessionAlive(body: string, step: string): void {
-  if (looksLikeSessionExpiredPage(body)) {
-    throw new BeanfunError('session.expired', `${step} returned a login page — session is gone`);
+  if (isSessionExpiredMessagePage(body)) {
+    throw new BeanfunError('session.expired', `${step} says 尚未登入 — session is gone`);
   }
 }
 

@@ -116,6 +116,7 @@ async function persistSession(client: BeanfunClient, session: Session): Promise<
     console.log('(--persist 略過:未設定 SESSION_ENCRYPTION_KEY)');
     return;
   }
+  // Keep this literal in sync with M0_SLOT in src/dev/capture.ts.
   const slot = process.env.CAPTURE_USER_ID?.trim() || 'm0-capture';
   store.save(slot, { session, cookies: await client.jar.serialize() });
   store.close();

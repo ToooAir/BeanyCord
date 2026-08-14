@@ -32,6 +32,9 @@ import { redactText, redactUrl } from '../core/redact.js';
 import { createStore } from '../core/store.js';
 import type { Session } from '../beanfun/types.js';
 
+/** Slot id `m0 --persist` writes to — keep in sync with `src/m0.ts`. */
+const M0_SLOT = 'm0-capture';
+
 interface Probe {
   name: string;
   url: string;
@@ -104,12 +107,25 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const wanted = process.env.CAPTURE_USER_ID?.trim();
-  const [userId, payload] = wanted
-    ? ([wanted, all.get(wanted)] as const)
-    : ([...all.entries()][0]!);
+  // Never guess when several slots exist: the DB normally also holds real users'
+  // sessions, and picking one by row order would fire requests with the wrong
+  // person's credentials. Prefer the explicit env var, then the dedicated m0
+  // slot, then a lone session — otherwise refuse and list the choices.
+  const wanted = process.env.CAPTURE_USER_ID?.trim() || (all.has(M0_SLOT) ? M0_SLOT : undefined);
+  const userId = wanted ?? (all.size === 1 ? [...all.keys()][0]! : undefined);
+  if (!userId) {
+    console.error(
+      `Several sessions are persisted — refusing to guess.\n` +
+        `  Slots: ${[...all.keys()].join(', ')}\n` +
+        `  Pick one with CAPTURE_USER_ID=<slot>, or create a dedicated one with ` +
+        '`npm run m0 -- --persist`.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const payload = all.get(userId);
   if (!payload) {
-    console.error(`No persisted session for ${wanted}. Present: ${[...all.keys()].join(', ')}`);
+    console.error(`No persisted session for ${userId}. Present: ${[...all.keys()].join(', ')}`);
     process.exitCode = 1;
     return;
   }

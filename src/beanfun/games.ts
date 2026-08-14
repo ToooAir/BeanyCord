@@ -24,11 +24,10 @@ export async function listGames(client: BeanfunClient): Promise<GameInfoBundle> 
   ensureSuccess(zoneRes, 'game_zone/');
   const zoneBody = boundedText(zoneRes);
   // `parseServiceList` throws GameListServiceListMissing when the marker isn't
-  // there, and a dead session is one way for that to happen: the portal answers
-  // HTTP 200 with a login page. Classify that case, or the user is told their
-  // login failed "because GameListServiceListMissing" and — worse — the dead
-  // session survives in the manager. A genuine format change keeps its own
-  // error, so the two stay distinguishable in logs.
+  // there. Captured from a real dead session, `game_zone/` still serves the full
+  // catalogue — it is public — so session death is NOT expected to land here;
+  // this stays as defence in case the portal ever gates it. A genuine format
+  // change keeps its own error, so the two remain distinguishable in logs.
   let services;
   try {
     services = parseServiceList(zoneBody);

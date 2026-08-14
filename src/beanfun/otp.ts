@@ -7,7 +7,12 @@
  *   is a fixed 64-hex protocol constant copied verbatim.
  * - Step 6 splits `1;<key8><cipherHex>`, DES-decrypts, trims trailing NULs.
  */
-import { BeanfunClient, boundedText, ensureSuccess } from './client.js';
+import {
+  BeanfunClient,
+  boundedText,
+  ensureSuccess,
+  looksLikeSessionExpiredPage,
+} from './client.js';
 import { TW } from './endpoints.js';
 import { BeanfunError } from './errors.js';
 import { extractLongPollingKey, extractSecretCode, extractServiceAccountCreateTime, extractUnkData } from './parser.js';
@@ -17,17 +22,6 @@ import { decryptHex } from './wcdes.js';
 
 /** Fixed protocol constant on step 5 (`ppppp=`). Provenance unknown; do not edit. */
 const PPPPP = '1F552AEAFF976018F942B13690C990F60ED01510DDF89165F1658CCE7BC21DBA';
-
-/**
- * A dead/hijacked session (e.g. someone re-logged in on another device and stole
- * this session) makes the portal serve a full HTML login/error page — HTTP 200,
- * so `ensureSuccess` passes — instead of the expected fragment. Detect that so
- * callers can report "session expired" cleanly instead of dumping the raw page.
- */
-export function looksLikeSessionExpiredPage(body: string): boolean {
-  const head = body.replace(/^﻿/, '').trimStart().slice(0, 512).toLowerCase();
-  return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<html');
-}
 
 interface Step1 {
   longPollingKey: string;

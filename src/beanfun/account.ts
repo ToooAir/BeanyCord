@@ -6,7 +6,7 @@
  *      5s timeout, failures degrade to null), concurrently.
  *   4. Sort by ascending ssn.
  */
-import { BeanfunClient, boundedText, ensureSuccess } from './client.js';
+import { assertSessionAlive, BeanfunClient, boundedText, ensureSuccess } from './client.js';
 import { TW } from './endpoints.js';
 import {
   extractAccountLimitNotice,
@@ -36,6 +36,12 @@ export async function getAccounts(
   const body = await fetchAccountListHtml(client, serviceCode, serviceRegion);
 
   const rows = extractServiceAccounts(body);
+  // `extractServiceAccounts` is a regex sweep: a login page matches nothing and
+  // yields [], which the Discord layer used to report as "沒有任何服務帳號" —
+  // telling the user their accounts vanished when the session had simply died.
+  // Only check once extraction has already come up empty (the *successful*
+  // response is HTML too, so "is this HTML?" can never gate this on its own).
+  if (rows.length === 0) assertSessionAlive(body, 'game_server_account_list.aspx');
   const createTimes = await Promise.all(
     rows.map((r) => getCreateTime(client, serviceCode, serviceRegion, r.ssn)),
   );

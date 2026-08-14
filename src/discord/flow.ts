@@ -136,7 +136,7 @@ export async function handleLogin(
 
 /** Logged-in → game menu (recovering if the resumed session is dead); else a
  *  fresh QR. The first message goes through `deliver`. Caller holds the lock. */
-async function beginLogin(
+export async function beginLogin(
   manager: SessionManager,
   userId: string,
   dm: DMChannel,
@@ -148,10 +148,14 @@ async function beginLogin(
       const m = await deliver(buildGameMenuPayload(games, '你已登入。請選擇遊戲:'));
       await setActive(userId, m, 'menu'); // retires any prior menu/OTP
     } catch (e) {
-      const m = await deliver({
-        content: `⚠️ 你的登入似乎已失效(${errText(e)})。請重新登入:`,
-        components: [reloginRow()],
-      });
+      const m = await deliver(
+        dropIfSessionDead(manager, userId, e)
+          ? sessionDeadMessage()
+          : {
+              content: `⚠️ 你的登入似乎已失效(${errText(e)})。請重新登入:`,
+              components: [reloginRow()],
+            },
+      );
       await setActive(userId, m, 'menu');
     }
     return;
@@ -574,11 +578,15 @@ export async function deliverOtp(
 
 /** Error codes that mean the Beanfun session itself is gone (not a transient
  *  hiccup) — usually because a login elsewhere hijacked this session. */
+const SESSION_DEAD_CODES = new Set([
+  'session.expired', // canonical: a login page came back instead of data
+  'session.logged_out', // echo_token.ashx said so outright
+  'otp.session_expired', // legacy, thrown by the OTP step-1 check
+  'login.missing_session_key',
+]);
+
 function isSessionDead(e: unknown): boolean {
-  return (
-    e instanceof BeanfunError &&
-    (e.code === 'otp.session_expired' || e.code === 'login.missing_session_key')
-  );
+  return e instanceof BeanfunError && SESSION_DEAD_CODES.has(e.code);
 }
 
 /**

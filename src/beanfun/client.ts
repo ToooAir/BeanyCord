@@ -121,6 +121,31 @@ export function isLoggedOutEcho(body: string): boolean {
   return m?.[1]?.trim() === '';
 }
 
+/**
+ * A dead/hijacked session (e.g. someone re-logged in on another device and stole
+ * this session) makes the portal serve a full HTML login/error page — HTTP 200,
+ * so `ensureSuccess` passes — instead of the expected fragment. Detect that so
+ * callers can report "session expired" cleanly instead of dumping the raw page.
+ *
+ * Lives here, next to `isLoggedOutEcho`, because "does this response prove the
+ * session is gone?" is one question with two answer shapes (HTML page vs. the
+ * echo_token JSON). Keeping them together is what stops the next endpoint from
+ * silently trusting its status code — the mistake that made ping() blind and
+ * `game_start_step2.aspx` dump raw HTML into a DM.
+ */
+export function looksLikeSessionExpiredPage(body: string): boolean {
+  const head = body.replace(/^﻿/, '').trimStart().slice(0, 512).toLowerCase();
+  return head.startsWith('<!doctype html') || head.startsWith('<html') || head.includes('<html');
+}
+
+/** Throw the canonical session-death error if `body` proves the session is gone.
+ *  Call this wherever an empty/unparseable result could just mean "logged out". */
+export function assertSessionAlive(body: string, step: string): void {
+  if (looksLikeSessionExpiredPage(body)) {
+    throw new BeanfunError('session.expired', `${step} returned a login page — session is gone`);
+  }
+}
+
 /** Throw on non-2xx, mirroring Rust `ensure_success`. */
 export function ensureSuccess(res: Response, step: string): void {
   if (res.statusCode < 200 || res.statusCode >= 300) {

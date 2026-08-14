@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { decryptEnvelope, looksLikeSessionExpiredPage } from '../src/beanfun/otp.js';
+import { looksLikeSessionExpiredPage } from '../src/beanfun/client.js';
+import { decryptEnvelope } from '../src/beanfun/otp.js';
 
 describe('looksLikeSessionExpiredPage', () => {
   it('flags a full HTML login page (the hijacked-session response)', () => {

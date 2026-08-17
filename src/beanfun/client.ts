@@ -84,6 +84,20 @@ export class BeanfunClient {
     return hit?.value;
   }
 
+  /**
+   * Read `bfSecretCode` as the portal itself would.
+   *
+   * The jar can hold two of these — one scoped to `.beanfun.com`, one host-only
+   * on `tw.beanfun.com` — and they hold different values. ASP.NET's
+   * `Request.Cookies["bfSecretCode"]` takes the first occurrence in the Cookie
+   * header, and got emits them in this same jar order, so index 0 is exactly
+   * the value the server will compare against.
+   */
+  async readSecretCode(): Promise<string | undefined> {
+    const cookies = await this.jar.getCookies(TW.portalBase);
+    return cookies.find((c) => c.key.toLowerCase() === 'bfsecretcode')?.value;
+  }
+
   /** Session keep-alive. Mirrors Rust `BeanfunClient::ping` (WPF pingWorker):
    *  GET `echo_token.ashx?webtoken=1` on the portal host. Throws on non-2xx or
    *  on a body that says the session is logged out; the caller's 60s loop

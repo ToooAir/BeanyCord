@@ -51,8 +51,8 @@ describe('decodeLaunchTicket', () => {
   });
 
   it('names the fields that are there when LaunchTicket is not', () => {
-    // The real 600309/A2 payload shape. Saying only "no table worked" here sent
-    // a whole round of investigation at the decoder, which was working fine —
+    // The real Mabinogi (600309_A2) payload shape. Saying only "no table worked"
+    // here sent a whole round of investigation at the decoder, which was fine —
     // the error has to distinguish "cannot read it" from "read it, no ticket".
     const blob = encodeLaunchData(11, '1a2b3c4d', legacyPlaintext());
     expect(() => decodeLaunchTicket(blob)).toThrowError(/fields: ppppp, ServiceCode/);

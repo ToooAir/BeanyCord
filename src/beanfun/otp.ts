@@ -14,8 +14,9 @@
  * `getOtp` picks between them on whether step 1's page hands the launcher a
  * `LaunchTicket` — the page's own shape, not the configured region — so a
  * region that migrates later needs no code change. Note the test is what the
- * handoff DECODES to, not that it exists: 600309/A2 carries an `m_objData`
- * whose payload is the legacy parameter set with no ticket in it.
+ * handoff DECODES to, not that it exists: Mabinogi (600309_A2) carries an
+ * `m_objData` whose payload is the legacy parameter set with no ticket in it,
+ * while MapleStory (610074_T9) carries a real one.
  *
  *   legacy: 1 init -> 2 secret code -> 3 record -> 4 long poll -> 5 GET  -> decrypt
  *   v2:     1 init -> 3 record (best effort)                   -> 5 POST -> decrypt
@@ -90,7 +91,8 @@ export async function getOtp(
   // Route on what the handoff DECODED to, not on it being present. A page can
   // carry `m_objData` and still hand the launcher the legacy parameter set
   // (`ppppp`, ServiceCode, …) with no LaunchTicket in it — observed on
-  // 600309/A2 — and for those the v2 endpoint has nothing to trade.
+  // Mabinogi (600309_A2) — and for those the v2 endpoint has nothing to trade.
+  // MapleStory (610074_T9), our default game, does carry one and takes v2.
   if (step1.launch && step1.fields?.['LaunchTicket']) {
     // Recording the start is what the page does alongside opening the launcher,
     // and nothing downstream depends on it — so a migrated page missing a field

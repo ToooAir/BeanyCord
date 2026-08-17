@@ -37,7 +37,7 @@ export const SAMPLE_PPPPP = 'f0e1d2c3'.repeat(14);
 
 /**
  * The other payload shape: no LaunchTicket, and the legacy OTP parameters
- * instead. Fields are joined by `&&&&`, as observed on 600309/A2.
+ * instead. Fields are joined by `&&&&`, as observed on Mabinogi (600309_A2).
  */
 export function legacyPlaintext(): string {
   const text = [

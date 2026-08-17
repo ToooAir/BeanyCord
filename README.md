@@ -208,6 +208,8 @@ pressure. It is dev-only and excluded from the build:
 ```sh
 npm run probe:otp           # run the real OTP chain instrumented: route decision,
                             # cookie inventory per host, a sweep of the inputs
+npm run probe:otp -- --list-games            # what else this account can probe
+SERVICE_CODE=610074 SERVICE_REGION=T9 npm run probe:otp   # any game, no re-login
 npm run probe:otp -- --write  # …and land the raw bytes in capture/ (gitignored)
 npm run analyze:launch      # then work the captured blob out offline, forever
 npm run capture -- alive|dead  # per-endpoint responses for a session you control

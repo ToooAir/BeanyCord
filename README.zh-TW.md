@@ -174,10 +174,16 @@ QR 登入 → 選遊戲 → 選帳號 → 印 OTP。換主機/IP 或懷疑協定
 ```sh
 npm run probe:otp             # 跑完整 OTP 鏈並附儀器：路由判定、各主機 cookie 盤點、
                               # 以及 step 5 各種輸入來源的掃描
+npm run probe:otp -- --list-games   # 列出這個帳號能測的所有遊戲（code_region + 名稱）
+SERVICE_CODE=610074 SERVICE_REGION=T9 npm run probe:otp   # 指定遊戲，不必重新登入
 npm run probe:otp -- --write  # 同上，並把原始位元組落地到 capture/（已 gitignore）
 npm run analyze:launch        # 之後就離線推敲那顆 blob，想跑幾次都行
 npm run capture -- alive|dead # 抓各端點在 session 存活／死亡時的回應
 ```
+
+**換遊戲不需要重新登入** —— 遊戲只是 session 上的兩個欄位，`SERVICE_CODE` /
+`SERVICE_REGION` 會覆蓋它，並照正規流程先打 `auth.aspx` 把 portal 切過去。
+不同遊戲可能走不同的 OTP 協定，要確認某個遊戲走哪條路時就用這個。
 
 輸出只印**欄位名稱、長度與雜湊，絕不印值**。`capture/` 底下是原始回應，含
 `bfWebToken`、secret code、帳號 id 與角色名，**不可提交**。

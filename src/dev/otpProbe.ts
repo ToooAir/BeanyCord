@@ -17,7 +17,15 @@
  * source and `ppppp`'s source — over the legacy endpoint, and reports which
  * combination the server accepts.
  *
- * Usage: `npm run probe:otp`  (add `--write` to dump raw bodies+headers)
+ * Usage:
+ *   npm run probe:otp                        # the game the session last used
+ *   npm run probe:otp -- --list-games        # what else this account can probe
+ *   SERVICE_CODE=610074 SERVICE_REGION=T9 npm run probe:otp
+ *   npm run probe:otp -- --write             # also dump raw bodies + headers
+ *
+ * Switching games needs no fresh login: a game is two fields on the session, and
+ * the override runs the shipped `getAccounts`, whose `auth.aspx` call is what
+ * actually moves the portal onto that game.
  *
  * Fires real requests with a real session and generates a real OTP. Raw output
  * goes to `capture/otp/`, which is gitignored: it contains bfWebToken, the
@@ -27,20 +35,22 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { getAccounts } from '../beanfun/account.js';
 import { boundedText } from '../beanfun/client.js';
 import { TW } from '../beanfun/endpoints.js';
+import { listGames } from '../beanfun/games.js';
 import { decodeLaunchFields } from '../beanfun/launchData.js';
 import { getOtp } from '../beanfun/otp.js';
 import {
   extractLongPollingKey,
   extractSecretCode,
   extractServiceAccountCreateTime,
-  extractServiceAccounts,
   extractUnkData,
 } from '../beanfun/parser.js';
 import { redactText, redactUrl } from '../core/redact.js';
 import { loadPersistedSession } from './loadSession.js';
 import type { CookieJar } from 'tough-cookie';
+import type { Session } from '../beanfun/types.js';
 
 /** Compare two secrets without printing either: equal inputs -> equal tags. */
 function fp(v: string | undefined): string {
@@ -88,28 +98,46 @@ async function main(): Promise<void> {
   const tokenMismatch = !!jarToken && jarToken !== session.webToken;
   console.log(`  -> ${tokenMismatch ? 'TOKEN MISMATCH (H1 confirmed)' : 'aligned'}\n`);
 
-  const sc = session.serviceCode;
-  const sr = session.serviceRegion;
-  if (!sc || !sr) {
-    console.error('Persisted session has no game selected — pick a game in the bot first.');
+  // --- Which game? -----------------------------------------------------------
+  // The persisted session carries whichever game was last picked, but a game is
+  // just two fields — switching does NOT need a fresh login. `--list-games`
+  // prints the catalogue; SERVICE_CODE/SERVICE_REGION probe any of them.
+  if (process.argv.includes('--list-games')) {
+    const { services } = await listGames(client);
+    console.log(`${services.length} services:\n`);
+    for (const g of services) {
+      const here = g.serviceCode === session.serviceCode && g.serviceRegion === session.serviceRegion;
+      console.log(`  ${`${g.serviceCode}_${g.serviceRegion}`.padEnd(14)} ${g.name}${here ? '   <- session' : ''}`);
+    }
+    console.log('\nProbe one with:  SERVICE_CODE=610074 SERVICE_REGION=T9 npm run probe:otp');
     store.close();
-    process.exitCode = 1;
     return;
   }
 
-  // --- Which account? Same list the bot shows. -------------------------------
-  const listRes = await client.http.get(
-    `${TW.portalBase}beanfun_block/game_zone/game_server_account_list.aspx`,
-    { searchParams: { sc, sr, dt: String(Date.now()) } },
-  );
-  const account = extractServiceAccounts(boundedText(listRes))[0];
-  if (!account) {
-    console.error(`No service accounts on the list (HTTP ${listRes.statusCode}) — session may be dead.`);
+  const sc = process.env.SERVICE_CODE?.trim() || session.serviceCode;
+  const sr = process.env.SERVICE_REGION?.trim() || session.serviceRegion;
+  if (!sc || !sr) {
+    console.error('No game: the session has none and SERVICE_CODE/SERVICE_REGION are unset.');
     store.close();
     process.exitCode = 1;
     return;
   }
-  console.log(`== using account ssn=${fp(account.ssn)} ==\n`);
+  const overridden = sc !== session.serviceCode || sr !== session.serviceRegion;
+  console.log(`== game ${sc}_${sr}${overridden ? ' (override — session holds ' + `${session.serviceCode}_${session.serviceRegion})` : ''} ==`);
+
+  // Go through the shipped `getAccounts`, not a hand-rolled list fetch: it fires
+  // `auth.aspx` first, which is what actually switches the portal to this game.
+  // Skipping it works only while the session already sits on the game you want.
+  const probeSession: Session = { ...session, serviceCode: sc, serviceRegion: sr };
+  const { accounts } = await getAccounts(client, probeSession, sc, sr);
+  const account = accounts[0];
+  if (!account) {
+    console.error('No service accounts for this game — you may not own one on it.');
+    store.close();
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`== using account ssn=${fp(account.ssn)} (of ${accounts.length}) ==\n`);
 
   // --- Step 1 ----------------------------------------------------------------
   const s1 = await client.http.get(`${TW.portalBase}beanfun_block/game_zone/game_start_step2.aspx`, {
@@ -301,7 +329,7 @@ async function main(): Promise<void> {
   // which is why this prints the shape of the result.
   console.log('\n== real getOtp() — the shipped v2 path ==');
   try {
-    const otp = await getOtp(client, session, account as never, sc, sr);
+    const otp = await getOtp(client, probeSession, account, sc, sr);
     const printable = /^[\x20-\x7e]+$/.test(otp);
     console.log(`  OK — decrypted ${otp.length} characters, ${printable ? 'all printable ASCII ✓' : 'NOT printable ASCII ✗ (decrypt assumption wrong)'}`);
     console.log('  (value withheld — request it through the bot to verify it actually logs in)');

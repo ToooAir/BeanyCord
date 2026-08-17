@@ -569,6 +569,11 @@ export async function deliverOtp(
       await manager.persist(userId).catch(() => undefined);
     } catch (e) {
       const verdict = await classifySessionError(manager, userId, e);
+      // The user gets a sentence in their DM; without this the operator gets
+      // nothing at all, and the code — which is the actionable part — never
+      // leaves the process.
+      const code = e instanceof BeanfunError ? e.code : 'unknown';
+      console.error(`[otp] failed for ${userId} (${code}, verdict=${verdict}):`, errText(e));
       await write(payloadFor(verdict, otpFailureMessage(e)));
     }
   });

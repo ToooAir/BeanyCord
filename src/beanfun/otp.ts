@@ -41,6 +41,7 @@
  *   a handoff supply their own, longer, per-request value under that name —
  *   prefer it, and keep the constant only for pages that supply nothing.
  */
+import { safeError } from '../core/redact.js';
 import {
   BeanfunClient,
   boundedText,
@@ -143,13 +144,31 @@ async function step1Init(
   if (launch) {
     try {
       fields = decodeLaunchFields(launch.data);
-    } catch {
-      fields = null;
+    } catch (e) {
+      // Loud, because this is the signature of the obfuscation having changed
+      // under us — the substitution tables live inside a launcher DLL Gamania
+      // can rebuild at any time. Swallowing it silently would drop the page into
+      // the legacy route, where a migrated game answers `Query String Error`,
+      // and the real cause would never appear anywhere.
+      console.warn(
+        `[otp] ${sc}_${sr}: launcher handoff present (${launch.data.length} chars) but could ` +
+          `NOT be decoded — falling back to the legacy route, which may not work for this ` +
+          `game. If this game used to work, the decode tables likely changed: ${safeError(e)}`,
+      );
     }
     if (fields?.['LaunchTicket']) {
+      console.log(`[otp] ${sc}_${sr} -> v2 (LaunchTicket present)`);
       return { launch, fields, pageUrl, longPollingKey: '', unkData: null, screatetime: '' };
     }
   }
+  // One line per fetch, deliberately: "which route did this game take, and why"
+  // is the single question a whole day of investigation came down to, and the
+  // answer was nowhere in the logs. Field names only — never their values.
+  console.log(
+    `[otp] ${sc}_${sr} -> legacy (${
+      fields ? `no LaunchTicket; fields: ${Object.keys(fields).join(', ')}` : launch ? 'handoff undecodable' : 'no handoff'
+    })`,
+  );
 
   const longPollingKey = extractLongPollingKey(body);
   if (!longPollingKey) {

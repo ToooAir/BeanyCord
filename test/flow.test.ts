@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BeanfunError } from '../src/beanfun/errors.js';
 import { SessionManager } from '../src/core/sessionManager.js';
@@ -59,6 +59,8 @@ async function runOtp(manager: SessionManager, userId: string): Promise<string> 
   return sent.join('');
 }
 
+afterEach(() => vi.restoreAllMocks());
+
 const loggedOut = () => Promise.reject(new BeanfunError('session.logged_out', 'gone'));
 const alive = () => Promise.resolve();
 
@@ -99,6 +101,22 @@ describe('deliverOtp — session death', () => {
     expect(await runOtp(manager, 'u4')).toContain('登入已失效');
     expect(ping).not.toHaveBeenCalled();
     expect(manager.isLoggedIn('u4')).toBe(false);
+  });
+
+  it('leaves a trace in the log, not only in the DM', async () => {
+    // The user gets a sentence; without this the operator gets nothing at all
+    // and the error code — the actionable part — never leaves the process.
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+    const manager = loggedIn('u6', alive);
+    getOtp.mockRejectedValueOnce(new BeanfunError('otp.server_rejected', 'nope'));
+
+    await runOtp(manager, 'u6');
+
+    expect(errors.join('\n')).toContain('otp.server_rejected');
+    expect(errors.join('\n')).toContain('u6');
   });
 
   it('keeps the session for a transient failure', async () => {

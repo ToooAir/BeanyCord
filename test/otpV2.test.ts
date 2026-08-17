@@ -14,7 +14,7 @@
  * These are wiring tests because that is where the failures were: every step
  * answered HTTP 200 while refusing to work.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { BeanfunClient } from '../src/beanfun/client.js';
 import { GGM_CV, GGM_HASH } from '../src/beanfun/clientIntegrity.js';
@@ -127,6 +127,17 @@ function recordingClient(
 
 const called = (calls: Call[], fragment: string): Call | undefined =>
   calls.find((c) => c.url.includes(fragment));
+
+// getOtp now reports its route decision. Captured rather than printed so the
+// suite stays readable, and asserted where the decision is the point.
+let logged: string[];
+beforeEach(() => {
+  logged = [];
+  const record = (...a: unknown[]): void => void logged.push(a.map(String).join(' '));
+  vi.spyOn(console, 'log').mockImplementation(record);
+  vi.spyOn(console, 'warn').mockImplementation(record);
+});
+afterEach(() => vi.restoreAllMocks());
 
 describe('getOtp — v2 route', () => {
   it('POSTs the launch ticket and decrypts the reply', async () => {
@@ -282,6 +293,34 @@ describe('getOtp — route selection', () => {
 
     const poll = called(calls, 'get_result.ashx');
     expect(poll?.opts.timeout?.request).toBeLessThanOrEqual(10_000);
+  });
+
+  it('logs which route it took, and why', async () => {
+    // The single question a whole day of investigation came down to, and the
+    // answer was nowhere in the logs.
+    const { client } = recordingClient(NO_TICKET_PAGE, {});
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toThrow();
+
+    expect(logged.join('\n')).toContain('600309_A2 -> legacy');
+    expect(logged.join('\n')).toContain('no LaunchTicket');
+  });
+
+  it('warns loudly when a handoff is present but cannot be decoded', async () => {
+    // The signature of the decode tables having changed inside the launcher
+    // DLL. Silently falling back to legacy would surface as an unrelated
+    // `Query String Error` on a migrated game, with the real cause nowhere.
+    const undecodable = `
+      <html><script>
+      var m_objData = { "sn": "SN-3", "data": "0${'abcdef01'.repeat(21)}" };
+      x = "GetResultByLongPolling&key=LPK123"
+      y = MyAccountData.ServiceAccountCreateTime + "unk=val";
+      </script></html>`;
+    const { client } = recordingClient(undecodable, {});
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toThrow();
+
+    const out = logged.join('\n');
+    expect(out).toContain('could NOT be decoded');
+    expect(out).toContain('decode tables likely changed');
   });
 
   it('declares the launcher build on the legacy route too', async () => {

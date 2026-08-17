@@ -213,7 +213,14 @@ SERVICE_CODE=610074 SERVICE_REGION=T9 npm run probe:otp   # any game, no re-logi
 npm run probe:otp -- --write  # …and land the raw bytes in capture/ (gitignored)
 npm run analyze:launch      # then work the captured blob out offline, forever
 npm run capture -- alive|dead  # per-endpoint responses for a session you control
+npm run check:ggm           # is the launcher identity we send still the accepted one
 ```
+
+`check:ggm` is a diagnostic, not a monitor: it compares our pinned `CV`/`Hash`
+against upstream's maintained pair and against the build beanfun says it ships.
+The same check runs at startup and beside a v2 refusal, so the answer is usually
+already in the log. It is deliberately **not** scheduled — a version difference
+is not an outage, and a daily report of one is a monitor nobody reads.
 
 All of it prints field names, lengths and hashes — never values. What each tool
 was built to answer, and the four wrong turns it took to get there, are in

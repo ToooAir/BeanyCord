@@ -179,6 +179,7 @@ SERVICE_CODE=610074 SERVICE_REGION=T9 npm run probe:otp   # 指定遊戲，不�
 npm run probe:otp -- --write  # 同上，並把原始位元組落地到 capture/（已 gitignore）
 npm run analyze:launch        # 之後就離線推敲那顆 blob，想跑幾次都行
 npm run capture -- alive|dead # 抓各端點在 session 存活／死亡時的回應
+npm run check:ggm             # 我們宣告的啟動器身分還是 Beanfun 收的那組嗎
 ```
 
 **換遊戲不需要重新登入** —— 遊戲只是 session 上的兩個欄位，`SERVICE_CODE` /
@@ -187,6 +188,15 @@ npm run capture -- alive|dead # 抓各端點在 session 存活／死亡時的回
 
 輸出只印**欄位名稱、長度與雜湊，絕不印值**。`capture/` 底下是原始回應，含
 `bfWebToken`、secret code、帳號 id 與角色名，**不可提交**。
+
+**`check:ggm` 是「診斷」不是「監控」。** 它比對三個來源：我們寫死的
+`CV`/`Hash`、上游 `pungin/Beanfun` 維護的 `ggm-client.json`、以及 Beanfun 自己的
+`CheckVersion.ashx`。**OTP 開始收到看不懂的伺服器拒絕時跑它** —— 答案是「一致」也有
+價值，那代表可以把這組值從嫌疑名單劃掉。
+
+同一份檢查也會在 **bot 啟動時印一行**，以及在 **v2 路徑被伺服器拒絕時**自動附在錯誤
+log 旁邊，所以多數情況你不需要自己跑。刻意**不做每日排程**：版本不同不等於壞掉
+（Beanfun 可能繼續接受舊的很久），每天叫一次只會讓人學會忽略它。
 
 那次協定變動的完整排查記錄（含四次判斷錯誤）在
 [`docs/OTP-2026-08-17.md`](./docs/OTP-2026-08-17.md)。

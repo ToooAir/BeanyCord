@@ -16,6 +16,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The v2 refusal path consults the launcher-identity check, which reaches the
+// network. The suite stays offline, so it is stubbed — and asserted, because a
+// refusal we cannot read is exactly when that line has to be in the log.
+const ggmVerdict = vi.hoisted(() => vi.fn(() => Promise.resolve({ status: 'aligned', line: 'STUB VERDICT' })));
+vi.mock('../src/beanfun/ggmCheck.js', () => ({ ggmVerdict }));
+
 import type { BeanfunClient } from '../src/beanfun/client.js';
 import { GGM_CV, GGM_HASH } from '../src/beanfun/clientIntegrity.js';
 import { getOtp } from '../src/beanfun/otp.js';
@@ -136,6 +142,7 @@ beforeEach(() => {
   const record = (...a: unknown[]): void => void logged.push(a.map(String).join(' '));
   vi.spyOn(console, 'log').mockImplementation(record);
   vi.spyOn(console, 'warn').mockImplementation(record);
+  vi.spyOn(console, 'error').mockImplementation(record);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -189,6 +196,16 @@ describe('getOtp — v2 route', () => {
       'record_service_start',
     );
     expect(await getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).toBe(OTP_PLAINTEXT);
+  });
+
+  it('reports the launcher identity beside a refusal it cannot read', async () => {
+    // Without this, a rejected CV/Hash pair looks like any other refusal and the
+    // one question worth asking gets asked days later, by hand.
+    const { client } = recordingClient(MIGRATED_PAGE, { result: 0, message: '???' });
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toThrow();
+
+    expect(ggmVerdict).toHaveBeenCalled();
+    expect(logged.join('\n')).toContain('STUB VERDICT');
   });
 
   it("surfaces the server's own refusal", async () => {

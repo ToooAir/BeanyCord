@@ -51,6 +51,7 @@ import {
 import { GGM_ARCH, GGM_CV, GGM_HASH } from './clientIntegrity.js';
 import { TW } from './endpoints.js';
 import { BeanfunError } from './errors.js';
+import { ggmVerdict } from './ggmCheck.js';
 import { decodeLaunchFields, decodeLaunchTicket, type LaunchFields } from './launchData.js';
 import {
   extractLaunchHandoff,
@@ -361,6 +362,11 @@ async function step5PostOtpV2(
   }
 
   if (parsed.result !== 1) {
+    // The pinned launcher identity is the likeliest reason for a refusal whose
+    // wording we cannot interpret, so answer that question here — beside the
+    // failure — rather than leaving someone to correlate it later. Cached, and
+    // it cannot throw.
+    console.error(`[ggm] ${(await ggmVerdict()).line}`);
     // Prefer the server's own wording; fall back to the code so the failure is
     // never reported as an empty string.
     const reason = parsed.message?.trim();

@@ -23,11 +23,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import 'dotenv/config';
-import { CookieJar } from 'tough-cookie';
-
 import {
-  BeanfunClient,
   isLoggedOutEcho,
   isSessionExpiredMessagePage,
   looksLikeSessionExpiredPage,
@@ -35,11 +31,8 @@ import {
 import { TW } from '../beanfun/endpoints.js';
 import { extractLongPollingKey, extractServiceAccounts } from '../beanfun/parser.js';
 import { redactText, redactUrl } from '../core/redact.js';
-import { createStore } from '../core/store.js';
+import { loadPersistedSession } from './loadSession.js';
 import type { Session } from '../beanfun/types.js';
-
-/** Slot id `m0 --persist` writes to — keep in sync with `src/m0.ts`. */
-const M0_SLOT = 'm0-capture';
 
 interface Probe {
   name: string;
@@ -100,46 +93,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  const store = createStore();
-  if (!store) {
-    console.error('No SESSION_ENCRYPTION_KEY — nothing is persisted, so there is nothing to load.');
+  const loaded = await loadPersistedSession();
+  if (!loaded) {
     process.exitCode = 1;
     return;
   }
-
-  const all = store.loadAll();
-  if (all.size === 0) {
-    console.error('No persisted sessions. Run `npm run m0 -- --persist` first.');
-    process.exitCode = 1;
-    return;
-  }
-  // Never guess when several slots exist: the DB normally also holds real users'
-  // sessions, and picking one by row order would fire requests with the wrong
-  // person's credentials. Prefer the explicit env var, then the dedicated m0
-  // slot, then a lone session — otherwise refuse and list the choices.
-  const wanted = process.env.CAPTURE_USER_ID?.trim() || (all.has(M0_SLOT) ? M0_SLOT : undefined);
-  const userId = wanted ?? (all.size === 1 ? [...all.keys()][0]! : undefined);
-  if (!userId) {
-    console.error(
-      `Several sessions are persisted — refusing to guess.\n` +
-        `  Slots: ${[...all.keys()].join(', ')}\n` +
-        `  Pick one with CAPTURE_USER_ID=<slot>, or create a dedicated one with ` +
-        '`npm run m0 -- --persist`.',
-    );
-    process.exitCode = 1;
-    return;
-  }
-  const payload = all.get(userId);
-  if (!payload) {
-    console.error(`No persisted session for ${userId}. Present: ${[...all.keys()].join(', ')}`);
-    process.exitCode = 1;
-    return;
-  }
+  const { userId, client, session, store } = loaded;
   console.log(`[capture] using session slot "${userId}" (state: ${state})`);
 
-  const jar = await CookieJar.deserialize(payload.cookies as never);
-  const client = new BeanfunClient({ jar });
-  const session = payload.session;
   const liveToken = (await client.readBfWebToken()) ?? session.webToken;
 
   const outDir = join(process.env.CAPTURE_OUT?.trim() || 'capture', state);

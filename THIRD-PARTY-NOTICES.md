@@ -24,6 +24,19 @@ BeanyCord 不依賴、亦避免複製任何 `pungin/Beanfun` 獨有、且不存�
 的原創表達。協定事實（端點 URL、請求順序、加密選擇、固定協定常數）屬於功能性內容，
 是以事實而非受保護之表達的形式被重現。
 
+### 2026-08-17 OTP 協定變更
+
+Beanfun 於 2026-08-17 變更 TW 的憑證取得流程。**查明該變更的研究工作由
+[`pungin/Beanfun`](https://github.com/pungin/Beanfun) 完成**（`get_webstart_otp_v2.ashx`
+的新契約、`Referer` 檢查、GGM 客戶端驗證參數、長輪詢與密碼無關），其中
+`LaunchTicket` 的解碼演算法與替換表由 [@takidog](https://github.com/takidog) 逆向
+Gamania 的 `GGMWebStart.dll` 後公開於
+[pungin/Beanfun#368](https://github.com/pungin/Beanfun/issues/368)。
+
+BeanyCord 據此以 TypeScript 獨立實作。所重現的同樣是協定事實——端點、請求形狀、
+必要標頭、以及自第三方二進位檔中萃取出的替換表——並非上述專案的原創表達。過程與
+逐項出處記於 [`docs/OTP-2026-08-17.md`](docs/OTP-2026-08-17.md)。
+
 若你是此衍生鏈中的著作權人，並認為此處的歸屬有不完整或錯誤之處，請開 issue 告知。
 
 ---

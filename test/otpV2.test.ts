@@ -160,18 +160,13 @@ describe('getOtp — v2 route', () => {
     expect(called(calls, 'get_result.ashx')).toBeUndefined();
   });
 
-  it("names step 1's page as the Referer on every generic_handlers call", async () => {
-    // Without this the handlers answer HTTP 200 with
-    // "The URL referrer is null or from a different domain!" — invisible to a
-    // status-code check, which is how it went unnoticed.
+  it("names step 1's page as the Referer on the v2 POST", async () => {
     const { client, calls } = recordingClient(MIGRATED_PAGE, { result: 1, data: OTP_DATA });
     await getOtp(client, SESSION, ACCOUNT, '600309', 'A2');
 
     const step1Url = calls[0]!.url;
     expect(step1Url).toContain('game_start_step2.aspx');
-    for (const call of calls.filter((c) => c.url.includes('generic_handlers'))) {
-      expect(call.opts.headers?.referer, call.url).toBe(step1Url);
-    }
+    expect(called(calls, 'get_webstart_otp_v2.ashx')?.opts.headers?.referer).toBe(step1Url);
   });
 
   it('still delivers the OTP when recording the start fails', async () => {
@@ -255,6 +250,19 @@ describe('getOtp — route selection', () => {
     const legacy = called(calls, 'ppppp=');
     expect(legacy?.url).toContain(`SecretCode=${COOKIE_SECRET}`);
     expect(legacy?.url).not.toContain('SecretCode=SECRET&');
+  });
+
+  it('sends no Referer on the legacy chain', async () => {
+    // Measured, not assumed: record_service_start answers Success without one,
+    // and step 5 returns the envelope without one. get_result.ashx does want it
+    // — and giving it one makes it hold the connection open for an answer we
+    // discard, so the header stays off deliberately.
+    const { client, calls } = recordingClient(LEGACY_PAGE, {});
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toThrow();
+
+    for (const call of calls) {
+      expect(call.opts.headers?.referer, call.url).toBeUndefined();
+    }
   });
 
   it('does not let the long poll stall the OTP', async () => {

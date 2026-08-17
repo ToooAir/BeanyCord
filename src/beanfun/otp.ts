@@ -24,10 +24,12 @@
  * `docs/OTP-PROTOCOL-CHANGE.md` has the full derivation.
  *
  * GOTCHAS:
- * - Handlers under `generic_handlers` now check `Referer` and reject a request
- *   without one ("The URL referrer is null or from a different domain!"), so
- *   every one of them names step 1's page URL. They answer HTTP 200 while
- *   refusing, so this failure is invisible to a status-code check.
+ * - Some handlers under `generic_handlers` check `Referer` and refuse without
+ *   one ("The URL referrer is null or from a different domain!") — while
+ *   answering HTTP 200, so a status-code check cannot see it. Measured on the
+ *   legacy chain, only `get_result.ashx` cares, and its answer is one we do not
+ *   want; `record_service_start.ashx` and the legacy step 5 both work without
+ *   the header. Only the v2 POST sends it.
  * - The v2 path deliberately skips step 2 and step 4: the request carries no
  *   secret code, and the page's `GetResultByLongPolling` call is the launcher's
  *   installation check — unrelated to the password, and it holds the connection
@@ -103,7 +105,7 @@ export async function getOtp(
 
   const secretCode = await step2GetSecretCode(client);
   await step3RecordStart(client, account, step1, serviceCode, serviceRegion);
-  await step4LongPoll(client, step1.longPollingKey, step1.pageUrl);
+  await step4LongPoll(client, step1.longPollingKey);
   const envelope = await step5GetOtp(client, session, account, step1, secretCode, serviceCode, serviceRegion);
   return decryptEnvelope(envelope);
 }
@@ -212,9 +214,11 @@ async function step3RecordStart(
   };
   if (step1.unkData) form[step1.unkData[0]] = step1.unkData[1];
 
+  // No `Referer`: measured, this handler answers
+  // `{'intResult': 1, 'strOutstring': 'Success'}` without one.
   const res = await client.http.post(
     `${TW.portalBase}beanfun_block/generic_handlers/record_service_start.ashx`,
-    { form, headers: { referer: step1.pageUrl } },
+    { form },
   );
   ensureSuccess(res, 'record_service_start.ashx');
 }
@@ -227,23 +231,23 @@ const LONG_POLL_BUDGET_MS = 5_000;
  *
  * This is the launcher's installation check, not part of credential retrieval:
  * step 5 returns an OTP envelope whether or not this succeeded, verified
- * directly (the sweep that found the secret-code fix had this step failing on
- * its referrer and still got the envelope).
+ * directly — the sweep that found the secret-code fix had this step failing and
+ * still got the envelope.
  *
- * And it is a *long poll* — it holds the connection open. While we sent no
- * `Referer` the server rejected it instantly and the cost was hidden; the
- * moment the referrer was correct, this became a 30-second stall on the OTP
- * path. So: keep making the call, bound it, and never let it fail the flow.
+ * Deliberately sent WITHOUT a `Referer`, which reads backwards until you see
+ * what each choice costs. Without one the server rejects it immediately and we
+ * move on; with one it does what it says and holds the connection open, which
+ * put a multi-second stall on every OTP fetch. Since we do not want its answer,
+ * the version that fails fast is the better one. Adding the header here was a
+ * change made on upstream's authority rather than on a measurement, and the
+ * measurement says it bought nothing.
+ *
+ * The budget below is left as a safety net, not as containment for that.
  */
-async function step4LongPoll(
-  client: BeanfunClient,
-  longPollingKey: string,
-  pageUrl: string,
-): Promise<void> {
+async function step4LongPoll(client: BeanfunClient, longPollingKey: string): Promise<void> {
   try {
     await client.http.get(`${TW.portalBase}generic_handlers/get_result.ashx`, {
       searchParams: { meth: 'GetResultByLongPolling', key: longPollingKey, _: dtIso() },
-      headers: { referer: pageUrl },
       timeout: { request: LONG_POLL_BUDGET_MS },
     });
   } catch {

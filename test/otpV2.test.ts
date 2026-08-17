@@ -341,8 +341,10 @@ describe('getOtp — route selection', () => {
   });
 
   it('declares the launcher build on the legacy route too', async () => {
-    // GGM 1.5.x appends CV/Hash/arch to the legacy GET and the server now
-    // rejects requests that omit it, so the fallback must not be born doomed.
+    // Alignment with GGM 1.5.x, not a requirement: measured, this endpoint
+    // returns an envelope with the triple omitted AND with a deliberately wrong
+    // pair. Pinned as behaviour we chose rather than behaviour the server
+    // demands — if it is ever removed, that should be a decision, not a drift.
     const { client, calls } = recordingClient(LEGACY_PAGE, {});
     await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toThrow();
 

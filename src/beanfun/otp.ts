@@ -305,9 +305,21 @@ async function step5GetOtp(
     `&ServiceAccount=${account.sid}` +
     `&CreateTime=${createTime}` +
     `&d=${tick}` +
-    // The legacy GET grew this suffix in Game Manager 1.5.x and now rejects
-    // requests that omit it. Sending it keeps this fallback genuinely usable
-    // rather than doomed the moment it is reached.
+    // Game Manager 1.5.x appends this suffix here too, so we match it — but it
+    // is alignment, not a requirement. Measured on 600309_A2 (`probe:otp`, three
+    // arms differing only in this triple): omitting it returns an envelope, and
+    // so does a deliberately wrong pair (`CV=9.9.9.9`, a hash of 64 zeros). This
+    // endpoint does not read the values. It was originally added here on the
+    // upstream note that the server "now rejects requests that omit it", which
+    // the sweep that found the secret-code fix had already disproved by sending
+    // none of the three and getting an envelope.
+    //
+    // Kept anyway: a request shaped like the official launcher's is the safer
+    // profile against beanfun's risk control, and the measurement says it costs
+    // nothing — a stale pin cannot break this route the way it can break v2.
+    // Which is the useful half to remember: when the LEGACY route starts
+    // failing, the GGM pair is not a suspect. Only v2 reads it, which is why
+    // `ggmVerdict()` is reported beside a v2 refusal and not this one.
     `&CV=${GGM_CV}&Hash=${GGM_HASH}&arch=${GGM_ARCH}`;
 
   const res = await client.http.get(url);

@@ -92,11 +92,15 @@ export function decodeLaunchTicket(data: string): string {
       `decoded launch data carries no LaunchTicket (fields: ${Object.keys(fields).join(', ') || 'none'})`,
     );
   }
-  if (ticket.length !== 64 || !/^[0-9a-f]+$/i.test(ticket)) {
-    throw new BeanfunError(
-      'launch.malformed_ticket',
-      `LaunchTicket is not 64 hex characters (got ${ticket.length})`,
-    );
+  // Presence decides the route; shape does not. Every ticket seen so far is 64
+  // hex characters, but pinning that is the same over-narrow acceptance that
+  // made a perfectly good decode look like a failure above — and the cost is
+  // asymmetric: routing already committed to v2 on the field being there, so a
+  // ticket we refuse to pass on is an OTP the user does not get, while one the
+  // server dislikes is a refusal it can explain itself. Upstream removed the
+  // identical check in hiimyusheng/Beanfun@283dc54 for the same reason.
+  if (ticket === '') {
+    throw new BeanfunError('launch.malformed_ticket', 'LaunchTicket is present but empty');
   }
   return ticket;
 }

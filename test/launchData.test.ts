@@ -79,9 +79,18 @@ describe('decodeLaunchFields', () => {
     });
   });
 
-  it('rejects a ticket that is not 64 hex characters', () => {
+  it('passes on a ticket that is not the 64 hex characters seen so far', () => {
+    // Routing has already committed to v2 by the time this runs, so refusing an
+    // unfamiliar shape costs the user their OTP over a rule we invented. Let the
+    // server judge its own ticket.
     const short = `LaunchTicket=abc123&ServiceCode=600309`.padEnd(48, '\0');
     const blob = encodeLaunchData(1, '1a2b3c4d', short);
-    expect(() => decodeLaunchTicket(blob)).toThrowError(/not 64 hex characters/);
+    expect(decodeLaunchTicket(blob)).toBe('abc123');
+  });
+
+  it('still rejects a LaunchTicket that is present but empty', () => {
+    const empty = `LaunchTicket=&ServiceCode=600309`.padEnd(40, '\0');
+    const blob = encodeLaunchData(1, '1a2b3c4d', empty);
+    expect(() => decodeLaunchTicket(blob)).toThrowError(/present but empty/);
   });
 });

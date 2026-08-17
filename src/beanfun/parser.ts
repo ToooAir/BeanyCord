@@ -115,6 +115,33 @@ export function extractSecretCode(html: string): string | null {
   return m ? m[1]! : null;
 }
 
+/** The `m_objData` launcher handoff — the marker that a page is on the v2 route. */
+export interface LaunchHandoff {
+  /** 36-character GUID, sent as `SN` on the v2 OTP request. */
+  sn: string;
+  /** Obfuscated blob carrying the LaunchTicket; see `launchData.ts`. */
+  data: string;
+}
+
+/**
+ * Extract `m_objData` from step 1's response.
+ *
+ * Returns null when the literal is absent or either member is empty: the page
+ * shape differs by region and only the v2 OTP path needs this, so a miss is not
+ * an error at scrape time — it selects the legacy route instead.
+ *
+ * `sn`/`data` are matched inside the captured block rather than against the
+ * whole page, so those generic key names cannot match something else.
+ */
+export function extractLaunchHandoff(html: string): LaunchHandoff | null {
+  const block = /var m_objData\s*=\s*\{([\s\S]*?)\}/.exec(html)?.[1];
+  if (!block) return null;
+  const sn = /"sn"\s*:\s*"([^"]*)"/.exec(block)?.[1];
+  const data = /"data"\s*:\s*"([^"]*)"/.exec(block)?.[1];
+  if (!sn || !data) return null;
+  return { sn, data };
+}
+
 // ---- game catalogue (games.rs) ---------------------------------------------
 const INI_KEYS: Record<string, keyof GameIniEntry> = {
   exe: 'exe',

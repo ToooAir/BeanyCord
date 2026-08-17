@@ -17,6 +17,14 @@
  * source and `ppppp`'s source — over the legacy endpoint, and reports which
  * combination the server accepts.
  *
+ * A second sweep follows it, with secret and `ppppp` pinned to the combination
+ * the first one proved: it varies only the `CV`/`Hash`/`arch` launcher identity
+ * — omitted, ours, deliberately wrong — to settle whether the legacy endpoint
+ * reads that triple at all. We ship it on this route on an upstream note rather
+ * than on a measurement, and if the endpoint validates a pair it is handed, then
+ * sending one it does not require is us putting the fallback behind the same
+ * expiring GGM pin as v2.
+ *
  * Usage:
  *   npm run probe:otp                        # the game the session last used
  *   npm run probe:otp -- --list-games        # what else this account can probe
@@ -37,6 +45,7 @@ import { join } from 'node:path';
 
 import { getAccounts } from '../beanfun/account.js';
 import { boundedText } from '../beanfun/client.js';
+import { GGM_ARCH, GGM_CV, GGM_HASH } from '../beanfun/clientIntegrity.js';
 import { TW } from '../beanfun/endpoints.js';
 import { listGames } from '../beanfun/games.js';
 import { decodeLaunchFields } from '../beanfun/launchData.js';
@@ -284,7 +293,10 @@ async function main(): Promise<void> {
   const CONST_PPPPP = '1F552AEAFF976018F942B13690C990F60ED01510DDF89165F1658CCE7BC21DBA';
   const createTime = screatetime.replace(/ /g, '%20');
 
-  const blobPpppp = handoffData ? decodeLaunchFields(handoffData)['ppppp'] : undefined;
+  const blobFields = handoffData ? decodeLaunchFields(handoffData) : undefined;
+  const blobPpppp = blobFields?.['ppppp'];
+  /** A migrated page's legacy door is bricked whatever we send it — see below. */
+  const onV2 = blobFields?.['LaunchTicket'] !== undefined;
   const cookieSecret = (await jar.getCookies(TW.portalBase)).find(
     (c) => c.key === 'bfSecretCode',
   )?.value;
@@ -320,6 +332,68 @@ async function main(): Promise<void> {
         ok ? '*** OK — ENVELOPE RETURNED ***' : redactText(body.slice(0, 120)).trim()
       }`);
     }
+  }
+
+  // --- Step 5 again: does the legacy endpoint read the launcher identity? -----
+  // `CV`/`Hash`/`arch` went onto the legacy GET in d446e32, alongside the secret
+  // fix, on upstream's note that GGM 1.5.x appends them and the server "now
+  // rejects requests that omit it". The sweep above already disproves the second
+  // half — it sent none of the three and got an envelope back — but nobody has
+  // asked the question the other way: is the triple ignored, required, or
+  // validated when present?
+  //
+  // That is not idle. `clientIntegrity.ts` pins a GGM build Gamania rotates a
+  // few times a year, and everyone compiling it in breaks together. If the
+  // legacy endpoint validates a pair it is given, then sending one it does not
+  // require puts the fallback route behind the same expiring pin as v2 — a
+  // failure mode we added ourselves.
+  //
+  // One variable at a time: secret and `ppppp` are pinned to the combination
+  // the sweep above already proved works.
+  //
+  // Only meaningful on a game still ON the legacy endpoint. A migrated one
+  // answers `Query String Error` to everything, so all three arms refuse for a
+  // reason that has nothing to do with the identity — and the reading printed
+  // below would then say the opposite of the truth. Refuse to run rather than
+  // produce three rows someone could read as an answer.
+  if (onV2) {
+    console.log('\n== step 5 launcher-identity arms — SKIPPED ==');
+    console.log(
+      `  ${sc}_${sr} is on v2, so its legacy door is bricked for every input and\n` +
+        '  these arms could not distinguish the identity from the migration.\n' +
+        '  Re-run against a legacy game (SERVICE_CODE=600309 SERVICE_REGION=A2).',
+    );
+  } else if (cookieSecret) {
+    console.log('\n== step 5 launcher-identity arms (legacy endpoint) ==');
+    const arms = [
+      { label: 'omitted', suffix: '' },
+      { label: 'ours (pinned pair)', suffix: `&CV=${GGM_CV}&Hash=${GGM_HASH}&arch=${GGM_ARCH}` },
+      // Well-formed but certainly not a build beanfun ships, so a refusal here
+      // means the values are read rather than merely tolerated.
+      { label: 'deliberately wrong', suffix: `&CV=9.9.9.9&Hash=${'0'.repeat(64)}&arch=${GGM_ARCH}` },
+    ];
+    for (const arm of arms) {
+      const url =
+        `${TW.portalBase}beanfun_block/generic_handlers/get_webstart_otp.ashx` +
+        `?SN=${longPollingKey}&WebToken=${session.webToken}&SecretCode=${cookieSecret}` +
+        `&ppppp=${blobPpppp ?? CONST_PPPPP}` +
+        `&ServiceCode=${sc}&ServiceRegion=${sr}&ServiceAccount=${account.sid}` +
+        `&CreateTime=${createTime}&d=${Math.trunc(Date.now()) | 0}` +
+        arm.suffix;
+      const res = await client.http.get(url);
+      const body = boundedText(res);
+      dump(`5_identity_${arm.label}.txt`.replace(/[\s()]+/g, '-'), body);
+      const ok = body.split(';')[0] === '1';
+      console.log(`  identity=${arm.label.padEnd(20)} -> ${
+        ok ? '*** OK — ENVELOPE RETURNED ***' : redactText(body.slice(0, 120)).trim()
+      }`);
+    }
+    console.log(
+      '  reading: all three OK -> the triple is ignored on this route, and sending\n' +
+        '           it buys nothing; wrong-only refused -> validated when present, so\n' +
+        '           we put the fallback behind the GGM pin ourselves; omitted refused\n' +
+        '           -> the comment in otp.ts is right and the sweep above got lucky.',
+    );
   }
 
   // The shipped code path, end to end. The one assumption the v2 port inherits

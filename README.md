@@ -170,8 +170,12 @@ can't be brute-forced online either. Optional `REQUIRED_GUILD_ID` and
 ## Tech stack
 
 TypeScript (ESM, Node ≥20) · discord.js v14 · got + tough-cookie · better-sqlite3 ·
-Node `crypto` (AES-256-GCM, legacy DES) · vitest · deployed as a single-instance
-Fly.io worker with a volume-mounted encrypted DB.
+Node `crypto` (AES-256-GCM, legacy DES) · vitest · deployed from the repo
+`Dockerfile` as a **single-instance worker** (Zeabur) with a volume-mounted
+encrypted DB at `/data`. No inbound port — it only makes outbound connections.
+Single instance is a correctness requirement, not a cost choice: Discord permits
+one gateway connection per token, the SQLite DB attaches to one volume, and
+per-user session state is in memory.
 
 ## Running it
 

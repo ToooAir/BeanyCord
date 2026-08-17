@@ -37,5 +37,6 @@ ENV NODE_OPTIONS=--openssl-legacy-provider
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-# /data is a mounted Fly volume at runtime (SESSION_DB_PATH points there).
+# /data must be a mounted persistent volume at runtime (SESSION_DB_PATH points
+# there); without one, every redeploy loses all sessions.
 CMD ["node", "dist/index.js"]

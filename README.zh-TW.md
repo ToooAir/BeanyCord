@@ -123,26 +123,44 @@ npm run bot                 # 啟動機器人
   session 會過期（背景 keep-alive ping 不算使用）。清除只在**行程重啟／重新部署
   載入時** lazy 觸發，沒有常駐計時器。
 
-## 部署到 Fly.io
+## 部署（Zeabur）
 
-長時間執行的 **worker**（無對內 port），以**單一機器** + 一顆 volume（存加密 DB）運行。
+這是一個長時間執行的 **worker**：只有對外連線（Discord gateway + Beanfun HTTP），
+**不開任何對內 port**，也不需要網域。由 repo 內的 `Dockerfile` 建置。
+
+無論用哪個平台，下面四個條件都必須成立，否則會出現難查的問題：
+
+| 條件 | 為什麼 |
+| --- | --- |
+| **只能跑一個實例** | Discord 一個 token 只允許一條 gateway 連線；SQLite DB 只能掛一台；per-user session 狀態在記憶體。**絕對不要開 autoscaling 或副本數 > 1** |
+| **`/data` 要掛持久化 volume** | 加密的 session DB 放這裡。沒有它的話**每次重新部署所有人都要重掃 QR** |
+| **`SESSION_ENCRYPTION_KEY` 必須穩定** | 換掉等於所有 session 失效 |
+| **`NODE_OPTIONS=--openssl-legacy-provider`** | OTP 的 DES 解密需要。已寫在 `Dockerfile` 的 `ENV`，但若平台覆蓋了環境變數要確認它還在 |
+
+Zeabur 的設定：
+
+1. 從 GitHub repo 建立服務，它會自動偵測 `Dockerfile`
+2. 掛一顆 volume 到 **`/data`**
+3. 環境變數：
 
 ```sh
-fly apps create beanycord                              # 名稱需全域唯一；被佔用就改 fly.toml 的 app
-fly volumes create beanycord_data --region nrt --size 1
-fly secrets set DISCORD_TOKEN=xxx \
-  SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32) ACCESS_CODE=your-code
-fly deploy
-fly scale count 1                                      # 維持單一實例
-npm run register                                       # 本機跑一次註冊指令
+DISCORD_TOKEN=…
+SESSION_ENCRYPTION_KEY=…          # openssl rand -hex 32，設定後別再動
+ACCESS_CODE=…
+SESSION_DB_PATH=/data/beanycord.sqlite
+SESSION_MAX_AGE_DAYS=30
+# 選用的存取控制：REQUIRED_GUILD_ID / ALLOWED_DISCORD_IDS / DISCORD_USER_INSTALL
 ```
 
-- **必須維持單一實例**：Discord 一 token 一條 gateway 連線、volume 只能掛一台、session
-  狀態在記憶體。勿 `scale count > 1` 或開 autoscaling。
-- **Beanfun 風控對 Fly 的 IP 未驗證**：原海外主機可用，但 Fly 東京（`nrt`）是不同 IP。
-  若被擋，可試 `BEANFUN_PROXY`，但這是**未經實測的應急選項**：它只在問題是「地理/
-  region」時可能有效；若是「機房 IP 信譽」被擋，台灣**機房** proxy 通常一樣無效，需
-  住宅/行動出口。且流量會經第三方（含 session/OTP），請只用你信任的 proxy。
+4. 部署完成後，在**本機**跑一次 `npm run register` 註冊 slash 指令（那是對 Discord API
+   的一次性操作，不屬於 runtime）
+
+- **Beanfun 風控會看出口 IP**。換平台或換區域等於換 IP，可能被擋。若遇到，可試
+  `BEANFUN_PROXY`，但這是**未經實測的應急選項**：它只在問題是「地理/region」時可能
+  有效；若是「機房 IP 信譽」被擋，台灣**機房** proxy 通常一樣無效，需住宅/行動出口。
+  且流量會經第三方（含 session/OTP），請只用你信任的 proxy。
+- 協定或 IP 出問題時，先用 `npm run m0` 確認「協定層 + 這台主機的 IP」是否可用，
+  再往下查（見下一節）。
 
 ## 診斷 CLI
 

@@ -149,3 +149,20 @@ npm run register                                       # 本機跑一次註冊�
 `npm run m0` 會在**不啟動 Discord** 的情況下，直接對實機跑一遍
 QR 登入 → 選遊戲 → 選帳號 → 印 OTP。換主機/IP 或懷疑協定變動時，用它最快確認
 「協定層 + 這台主機的 IP」是否可用。
+
+**協定被改動時**（2026-08 就發生過一次，Beanfun 把部分遊戲的憑證取得搬進原生啟動器），
+`m0` 只會告訴你壞了，不會告訴你壞在哪。這幾個工具是為了那種時候準備的，不進 build：
+
+```sh
+npm run probe:otp             # 跑完整 OTP 鏈並附儀器：路由判定、各主機 cookie 盤點、
+                              # 以及 step 5 各種輸入來源的掃描
+npm run probe:otp -- --write  # 同上，並把原始位元組落地到 capture/（已 gitignore）
+npm run analyze:launch        # 之後就離線推敲那顆 blob，想跑幾次都行
+npm run capture -- alive|dead # 抓各端點在 session 存活／死亡時的回應
+```
+
+輸出只印**欄位名稱、長度與雜湊，絕不印值**。`capture/` 底下是原始回應，含
+`bfWebToken`、secret code、帳號 id 與角色名，**不可提交**。
+
+那次協定變動的完整排查記錄（含四次判斷錯誤）在
+[`docs/OTP-2026-08-17.md`](./docs/OTP-2026-08-17.md)。

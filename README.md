@@ -59,11 +59,16 @@ src/
 │   ├── client.ts       per-user HTTP client: one cookie jar shared by two got
 │   │                   instances (redirect / no-redirect), bounded response bodies
 │   ├── login/          QR login state machine: init → poll → finalize → session key
-│   ├── otp.ts          5-step OTP retrieval pipeline + WCDES decrypt
+│   ├── otp.ts          OTP retrieval — two protocols, routed per game (see below)
+│   ├── launchData.ts   decodes the launcher handoff the migrated flow hands over
+│   ├── clientIntegrity.ts  the launcher build the new endpoint demands you name
 │   ├── wcdes.ts        DES-ECB-NoPadding, byte-compatible with the WPF/Rust reference
 │   ├── games.ts        service catalog
 │   ├── account.ts      service-account listing
 │   └── parser.ts       HTML/JSON scraping that mirrors WPF parsing exactly
+│
+├── dev/            Not shipped (excluded from the build) — instrumentation for
+│                   when the protocol moves under you; see "Protocol drift"
 │
 ├── core/           Transport-agnostic state & persistence (no discord.js)
 │   ├── sessionManager.ts   per-user state, async mutex, 60s keep-alive ping
@@ -144,9 +149,14 @@ can't be brute-forced online either. Optional `REQUIRED_GUILD_ID` and
   `setAutoPadding(false)` because it's byte-equal to .NET `DES + ECB +
   PaddingMode.None`, validated against fixtures generated from the reference port.
   A pure-JS DES was rejected — it only does PKCS padding, not NoPadding.
-- **Faithful protocol quirks.** The OTP step-5 URL is hand-built rather than passed
-  through a query builder, because the server expects spaces as `%20` (not `+`) and
-  a fixed 64-hex protocol constant left verbatim. Small infidelities here just fail.
+- **Faithful protocol quirks — and one deliberate infidelity.** The legacy OTP URL
+  is hand-built rather than passed through a query builder, because the server
+  expects spaces as `%20` (not `+`) and a fixed 64-hex constant left verbatim.
+  Small infidelities there just fail. But faithfulness is not the goal, working is:
+  the reference clients read `SecretCode` off a page served by a *different host*,
+  and the portal validates against its own cookie. Those values used to agree.
+  When they stopped, a 1:1 port was exactly wrong — see
+  [`docs/OTP-2026-08-17.md`](./docs/OTP-2026-08-17.md).
 - **Crash-safe persistence.** A single corrupt/undecryptable session row is logged
   and dropped on load, never fatal — one bad blob can't block startup.
 - **Keep-alive death detection.** A single failed 60s ping is transient (network /
@@ -178,6 +188,30 @@ npm run bot                 # start (sets NODE_OPTIONS=--openssl-legacy-provider
 `npm run m0` runs the whole protocol core — QR login → game → account → OTP —
 against the live host **without Discord**, the fastest way to confirm the protocol
 still works after a host/IP change.
+
+## Protocol drift
+
+This talks to a service that owes it nothing, and in August 2026 Beanfun moved TW
+game starts into a native launcher and took the credential endpoint with them.
+Two OTP protocols now coexist and the route is chosen per game, by what the
+game-start page hands the launcher: MapleStory takes the new one, Mabinogi still
+takes the old.
+
+The lesson from that week was that reasoning about the wire loses to measuring it,
+so the recovery tooling is part of the repo rather than something to rebuild under
+pressure. It is dev-only and excluded from the build:
+
+```sh
+npm run probe:otp           # run the real OTP chain instrumented: route decision,
+                            # cookie inventory per host, a sweep of the inputs
+npm run probe:otp -- --write  # …and land the raw bytes in capture/ (gitignored)
+npm run analyze:launch      # then work the captured blob out offline, forever
+npm run capture -- alive|dead  # per-endpoint responses for a session you control
+```
+
+All of it prints field names, lengths and hashes — never values. What each tool
+was built to answer, and the four wrong turns it took to get there, are in
+[`docs/OTP-2026-08-17.md`](./docs/OTP-2026-08-17.md).
 
 ## License & attribution
 

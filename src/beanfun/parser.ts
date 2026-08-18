@@ -54,6 +54,60 @@ export function normalizeDeeplink(raw: string): string {
   return raw;
 }
 
+/**
+ * The host that owns the Beanfun app's deep links, and the one path it claims.
+ *
+ * Not guessed — read off the app-link manifests, which is also how to re-check
+ * it if tapping ever stops opening the app:
+ *
+ *   https://play.games.gamania.com/.well-known/apple-app-site-association
+ *     -> appID 343573QVQ5.com.gamania.beanfun, components [{ "/": "/deeplink" }]
+ *   https://play.games.gamania.com/.well-known/assetlinks.json
+ *     -> handle_all_urls for android_app com.gamania.beanfun
+ */
+const APP_LINK_ORIGIN = 'https://play.games.gamania.com';
+const APP_LINK_PATH = '/deeplink';
+
+/**
+ * The https form of the QR deep link, for somewhere that can only render http(s).
+ *
+ * Beanfun hands out `gameplapp://gameplhost/deeplink?type=1&action=web&code=…`.
+ * A phone resolves that scheme fine — pasting it into Safari opens the app — but
+ * Discord only turns http/https into something tappable: it does not autolink an
+ * unknown scheme, rejects it in a masked link, and refuses it on a link button.
+ * So the deep link reached the user as text they had to select and paste by hand,
+ * on the one device where the deep link is the whole point (you cannot scan a QR
+ * that is on the screen you are holding).
+ *
+ * Both manifests above claim `/deeplink` on that origin for the Beanfun app, so
+ * the same query under https is a universal / app link: with the app installed a
+ * tap opens it, and without it the URL is a real page rather than a dead scheme.
+ *
+ * Returns null rather than guessing when the input is not the shape we know —
+ * a link that cannot open the app is worse than no button, because it looks like
+ * one that can.
+ */
+export function appLinkFromDeeplink(raw: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  // Already the https form (e.g. if beanfun goes back to handing that out).
+  if (u.protocol === 'https:') {
+    const sameTarget =
+      `${u.protocol}//${u.host}` === APP_LINK_ORIGIN &&
+      u.pathname.toLowerCase().replace(/\/$/, '') === APP_LINK_PATH;
+    return sameTarget ? u.toString() : null;
+  }
+  if (u.protocol !== 'gameplapp:') return null;
+  // `new URL` puts `gameplhost` in `hostname` and `/deeplink` in `pathname`.
+  if (u.pathname.toLowerCase().replace(/\/$/, '') !== APP_LINK_PATH) return null;
+  if (u.search === '') return null;
+  return `${APP_LINK_ORIGIN}${APP_LINK_PATH}${u.search}`;
+}
+
 // ---- service-account rows (core/parser/account.rs) -------------------------
 export interface ServiceAccountRow {
   isEnable: boolean;

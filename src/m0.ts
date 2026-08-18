@@ -62,7 +62,8 @@ async function main(): Promise<void> {
   const b64 = qr.bitmapBase64.replace(/^data:image\/png;base64,/, '');
   writeFileSync('qr.png', Buffer.from(b64, 'base64'));
   console.log('已將 QR 圖存成 qr.png — 用 Beanfun App 掃描它。');
-  if (qr.deeplink) console.log(`(或開啟 deeplink) ${qr.deeplink}`);
+  if (qr.appLink) console.log(`(手機可直接點開) ${qr.appLink}`);
+  if (qr.deeplink) console.log(`(或貼到瀏覽器網址列) ${qr.deeplink}`);
   console.log('等待掃描核准中...');
 
   const session = await waitForQrApproval(client, qr);

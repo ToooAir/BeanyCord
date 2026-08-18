@@ -58,6 +58,8 @@ export interface QrLoginInit {
   /** Full `data:image/png;base64,...` data URL — the server-provided PNG. */
   bitmapBase64: string;
   deeplink: string | null;
+  /** The same deep link as https, for renderers that only linkify http(s). */
+  appLink: string | null;
   /** `__RequestVerificationToken` replayed by the poll step. */
   verificationToken: string;
 }

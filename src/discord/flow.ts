@@ -32,7 +32,7 @@ import { initQrLogin } from '../beanfun/login/qrInit.js';
 import { pollQrLogin } from '../beanfun/login/qrPoll.js';
 import { getSessionKey } from '../beanfun/login/sessionKey.js';
 import { getOtp } from '../beanfun/otp.js';
-import type { ServiceAccount } from '../beanfun/types.js';
+import type { QrLoginInit, ServiceAccount } from '../beanfun/types.js';
 import { Cooldown } from '../core/guard.js';
 import { safeError } from '../core/redact.js';
 import type { SessionManager, UserState } from '../core/sessionManager.js';
@@ -177,7 +177,7 @@ async function sendFreshQr(
     const init = await initQrLogin(state.client, skey);
     state.pendingInit = init;
 
-    const msg = await deliver(buildQrPayload(init.bitmapBase64, init.deeplink));
+    const msg = await deliver(buildQrPayload(init));
     await setActive(userId, msg, 'menu'); // retires any prior menu/OTP
     startQrPolling(manager, userId, dm, msg);
   } catch (e) {
@@ -202,19 +202,63 @@ export async function handleLoginRefresh(
   });
 }
 
-function buildQrPayload(bitmapBase64: string, deeplink: string | null): BaseMessageOptions {
-  const b64 = bitmapBase64.replace(/^data:image\/png;base64,/, '');
+/** Discord's cap on a link button's URL. Longer and the API rejects the message. */
+const MAX_BUTTON_URL = 512;
+/** Discord's cap on an embed field value; the fenced deep link must fit inside. */
+const MAX_FIELD_VALUE = 1024;
+
+/**
+ * The QR message.
+ *
+ * On a phone the QR code is useless — you cannot scan the screen you are
+ * holding — so the deep link is the whole flow there, not a footnote. It used to
+ * arrive as bare `gameplapp://…` text, which Discord will not linkify, leaving
+ * the user to select ~400 characters by hand and paste them into a browser.
+ * `appLinkFromDeeplink` turns it into the https app link the Beanfun app claims,
+ * which a link button can carry.
+ *
+ * The raw scheme stays, fenced so a tap copies it, because a link button is not
+ * guaranteed to hand off: an in-app browser can swallow a universal link and
+ * show the landing page instead. Then pasting is still the way through, and it
+ * is the one route already known to work.
+ */
+function buildQrPayload(init: QrLoginInit): BaseMessageOptions {
+  const b64 = init.bitmapBase64.replace(/^data:image\/png;base64,/, '');
   const file = new AttachmentBuilder(Buffer.from(b64, 'base64'), { name: 'qr.png' });
+  const appLink = init.appLink && init.appLink.length <= MAX_BUTTON_URL ? init.appLink : null;
+
   const embed = new EmbedBuilder()
     .setTitle('Beanfun QR 登入')
-    .setDescription('用 Beanfun App 掃描下方 QR 碼 (約 2 分鐘內有效)。')
+    .setDescription(
+      '用 Beanfun App 掃描下方 QR 碼 (約 2 分鐘內有效)。' +
+        (appLink ? '\n**手機上請改按下方的「📱 用 App 開啟」** — 自己的螢幕掃不到自己。' : ''),
+    )
     .setImage('attachment://qr.png');
-  if (deeplink) embed.addFields({ name: ' 或開啟 deeplink', value: deeplink.slice(0, 1024) });
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+  if (init.deeplink) {
+    // Fenced: on mobile a tap on a code block offers "copy", which is the
+    // difference between this being usable and being a wall of text.
+    const fenced = `\`\`\`\n${init.deeplink}\n\`\`\``;
+    if (fenced.length <= MAX_FIELD_VALUE) {
+      embed.addFields({
+        name: appLink ? '按鈕沒反應時的備援 (複製後貼到瀏覽器網址列)' : '或複製這串貼到瀏覽器網址列',
+        value: fenced,
+      });
+    }
+  }
+
+  const buttons: ButtonBuilder[] = [];
+  if (appLink) {
+    buttons.push(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('📱 用 App 開啟').setURL(appLink));
+  }
+  buttons.push(
     new ButtonBuilder().setCustomId(CID.loginCancel).setLabel('取消').setStyle(ButtonStyle.Secondary),
   );
-  return { embeds: [embed], files: [file], components: [row] };
+  return {
+    embeds: [embed],
+    files: [file],
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
+  };
 }
 
 function startQrPolling(

@@ -7,7 +7,7 @@
 import { BeanfunClient, boundedText, ensureSuccess } from '../client.js';
 import { TW } from '../endpoints.js';
 import { BeanfunError } from '../errors.js';
-import { extractVerificationToken, normalizeDeeplink } from '../parser.js';
+import { appLinkFromDeeplink, extractVerificationToken, normalizeDeeplink } from '../parser.js';
 import type { QrLoginInit } from '../types.js';
 
 interface InitLoginResponse {
@@ -56,6 +56,7 @@ export async function initQrLogin(client: BeanfunClient, skey: string): Promise<
     skey,
     bitmapBase64: `data:image/png;base64,${raw}`,
     deeplink: deeplink && deeplink !== '' ? deeplink : null,
+    appLink: deeplink ? appLinkFromDeeplink(deeplink) : null,
     verificationToken,
   };
 }

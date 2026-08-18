@@ -25,6 +25,21 @@
  * sending one it does not require is us putting the fallback behind the same
  * expiring GGM pin as v2.
  *
+ * A third sweep asks v2 the same question, which is the one that actually
+ * matters: the whole "the GGM pin expires and everyone breaks together" risk
+ * assumes `get_webstart_otp_v2.ashx` validates the pair, and that has never
+ * been measured. Each arm gets a freshly fetched LaunchTicket so a spent ticket
+ * cannot masquerade as a rejected identity, and the reading is withheld unless
+ * the baseline arm succeeded.
+ *
+ * A fourth sweep follows from what the third one finds. If the gate is real,
+ * an expiring pin breaks everyone at once and nothing detects it until a user
+ * happens to take the v2 route — which a deployment sitting on legacy games may
+ * not do for months. So it asks whether the gate answers a request carrying a
+ * deliberately worthless ticket, with and without session cookies: if it does,
+ * the pin can be watched by a scheduled request that burns no ticket, needs no
+ * user, and produces no OTP.
+ *
  * Usage:
  *   npm run probe:otp                        # the game the session last used
  *   npm run probe:otp -- --list-games        # what else this account can probe
@@ -39,18 +54,21 @@
  * goes to `capture/otp/`, which is gitignored: it contains bfWebToken, the
  * secret code, account ids and character names.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { CookieJar } from 'tough-cookie';
+
 import { getAccounts } from '../beanfun/account.js';
-import { boundedText } from '../beanfun/client.js';
+import { BeanfunClient, boundedText } from '../beanfun/client.js';
 import { GGM_ARCH, GGM_CV, GGM_HASH } from '../beanfun/clientIntegrity.js';
 import { TW } from '../beanfun/endpoints.js';
 import { listGames } from '../beanfun/games.js';
-import { decodeLaunchFields } from '../beanfun/launchData.js';
+import { decodeLaunchFields, decodeLaunchTicket } from '../beanfun/launchData.js';
 import { getOtp } from '../beanfun/otp.js';
 import {
+  extractLaunchHandoff,
   extractLongPollingKey,
   extractSecretCode,
   extractServiceAccountCreateTime,
@@ -58,7 +76,7 @@ import {
 } from '../beanfun/parser.js';
 import { redactText, redactUrl } from '../core/redact.js';
 import { loadPersistedSession } from './loadSession.js';
-import type { CookieJar } from 'tough-cookie';
+
 import type { Session } from '../beanfun/types.js';
 
 /** Compare two secrets without printing either: equal inputs -> equal tags. */
@@ -394,6 +412,260 @@ async function main(): Promise<void> {
         '           we put the fallback behind the GGM pin ourselves; omitted refused\n' +
         '           -> the comment in otp.ts is right and the sweep above got lucky.',
     );
+  }
+
+  // --- v2: is the launcher identity validated THERE? -------------------------
+  // The arms above settled the legacy GET: that endpoint does not read the
+  // triple. v2 is the one that matters, and nobody has asked it the same
+  // question — we ship `CV`/`Hash` there on upstream's account, and the whole
+  // "the pin expires and everyone breaks together" risk rests on the assumption
+  // that this endpoint validates them. That assumption has never been measured.
+  //
+  // It is worth measuring because every outcome is actionable, and one of them
+  // deletes the risk outright:
+  //   - all arms OK          -> v2 ignores the triple too. The pin is cosmetic,
+  //                             `ggmVerdict()` beside a v2 refusal is pointing at
+  //                             an innocent party, and there is nothing to expire.
+  //   - omitted OK, wrong refused
+  //                          -> validated only when present, so NOT sending it is
+  //                             strictly safer than sending a pair that will age.
+  //   - only ours OK         -> the gate is real. The refusal wording printed here
+  //                             is then the signature we currently do not have, and
+  //                             without it a future expiry is unrecognisable.
+  // Splitting CV from Hash answers the follow-up in the same run: a version bump
+  // alone breaks us only if CV is read on its own.
+  //
+  // Only meaningful on a game that HANDS OVER a ticket. A legacy page has none,
+  // so every arm would be refused for a reason unrelated to the identity — the
+  // same trap the legacy arms above sidestep, in the opposite direction.
+  // Set by the sweep below when the pair we actually ship is confirmed good
+  // right now — which is the premise the bogus-ticket sweep after it needs.
+  let pinnedPairGoodNow: boolean | null = null;
+  if (!onV2) {
+    console.log('\n== v2 launcher-identity arms — SKIPPED ==');
+    console.log(
+      `  ${sc}_${sr} hands over no LaunchTicket, so get_webstart_otp_v2.ashx has\n` +
+        '  nothing to trade and would refuse every arm for an unrelated reason.\n' +
+        '  Re-run against a v2 game (SERVICE_CODE=610074 SERVICE_REGION=T9).',
+    );
+  } else {
+    console.log('\n== v2 launcher-identity arms (get_webstart_otp_v2.ashx) ==');
+    const WRONG_CV = '9.9.9.9';
+    const WRONG_HASH = '0'.repeat(64);
+    const v2Arms: { label: string; cv?: string; hash?: string }[] = [
+      { label: 'ours (pinned pair)', cv: GGM_CV, hash: GGM_HASH },
+      { label: 'omitted entirely' },
+      { label: 'both wrong', cv: WRONG_CV, hash: WRONG_HASH },
+      { label: 'wrong CV, our Hash', cv: WRONG_CV, hash: GGM_HASH },
+      { label: 'our CV, wrong Hash', cv: GGM_CV, hash: WRONG_HASH },
+    ];
+
+    // A ticket may well be single-use. Re-fetching step 1 per arm makes every
+    // arm's ticket fresh, so a later refusal cannot be a spent ticket wearing
+    // the identity's clothes — and fingerprinting them makes that visible
+    // instead of assumed: if the tags repeat, the pages are handing out the
+    // same ticket and replay is back on the table as an explanation.
+    const ticketTags: string[] = [];
+    const armOk: boolean[] = [];
+    for (const arm of v2Arms) {
+      const fresh = await client.http.get(
+        `${TW.portalBase}beanfun_block/game_zone/game_start_step2.aspx`,
+        { searchParams: { service_code: sc, service_region: sr, sotp: account.ssn, dt: String(Date.now()) } },
+      );
+      const handoff = extractLaunchHandoff(boundedText(fresh));
+      if (!handoff) {
+        console.log(`  identity=${arm.label.padEnd(20)} -> SKIPPED (step 1 returned no handoff this time)`);
+        armOk.push(false);
+        continue;
+      }
+      let ticket: string;
+      try {
+        ticket = decodeLaunchTicket(handoff.data);
+      } catch (e) {
+        console.log(`  identity=${arm.label.padEnd(20)} -> SKIPPED (ticket would not decode: ${
+          e instanceof Error ? e.message : String(e)
+        })`);
+        armOk.push(false);
+        continue;
+      }
+      ticketTags.push(fp(ticket));
+
+      const payload: Record<string, string> = { SN: handoff.sn, LaunchTicket: ticket };
+      if (arm.cv !== undefined) payload['CV'] = arm.cv;
+      if (arm.hash !== undefined) payload['Hash'] = arm.hash;
+      if (arm.cv !== undefined || arm.hash !== undefined) payload['arch'] = GGM_ARCH;
+
+      const res = await client.http.post(
+        `${TW.portalBase}beanfun_block/generic_handlers/get_webstart_otp_v2.ashx`,
+        // The page that produced THIS ticket, which is what the shipped path sends.
+        { headers: { referer: fresh.url }, json: payload },
+      );
+      const body = boundedText(res);
+      dump(`5_v2_identity_${arm.label}.txt`.replace(/[\s(),]+/g, '-'), body);
+
+      // Report the shape, not the OTP. `result` is the server's own verdict; a
+      // body that is not JSON at all is itself a finding, so say that rather
+      // than letting a parse error surface as a probe crash.
+      let ok = false;
+      let note: string;
+      try {
+        const parsed = JSON.parse(body) as { result?: number; data?: string | null; message?: string | null };
+        ok = parsed.result === 1;
+        note = ok
+          ? `*** OK — data ${parsed.data?.length ?? 0}c ***`
+          : `result=${String(parsed.result)} message=${redactText(String(parsed.message ?? '')).slice(0, 90)}`;
+      } catch {
+        note = `NON-JSON (HTTP ${res.statusCode}): ${redactText(body.slice(0, 90)).replace(/\s+/g, ' ')}`;
+      }
+      armOk.push(ok);
+      console.log(`  identity=${arm.label.padEnd(20)} ticket=${fp(ticket)} -> ${note}`);
+    }
+
+    const distinctTickets = new Set(ticketTags).size;
+    console.log(
+      `  tickets: ${ticketTags.length} fetched, ${distinctTickets} distinct` +
+        (distinctTickets === ticketTags.length
+          ? ' — each arm had a fresh one, so replay cannot explain a refusal'
+          : ' — REPEATED: a refusal below may be a spent ticket, not the identity'),
+    );
+
+    // Refuse to interpret when the control failed. If the pair we actually ship
+    // cannot get an OTP right now, every other arm is measuring that outage
+    // instead of the identity, and a reading printed here would be worse than
+    // none — the failure mode the legacy arms were rewritten to avoid.
+    pinnedPairGoodNow = armOk[0] === true;
+    if (armOk[0] !== true) {
+      console.log(
+        '  reading: WITHHELD — the baseline arm (our pinned pair) did not succeed,\n' +
+          '           so nothing below it isolates the launcher identity. Fix or\n' +
+          '           explain the baseline first, then re-run.',
+      );
+    } else {
+      const allOk = armOk.every((v) => v);
+      const omittedOk = armOk[1] === true;
+      const anyWrongOk = armOk[2] === true || armOk[3] === true || armOk[4] === true;
+      console.log(
+        `  reading: ${
+          allOk
+            ? 'ALL arms accepted -> v2 does NOT read the triple either. The pin cannot\n' +
+              '           expire, and ggmVerdict() beside a v2 refusal is accusing the wrong thing.'
+            : !anyWrongOk && omittedOk
+              ? 'wrong pairs refused, omitting accepted -> validated only when present.\n' +
+                '           Sending nothing is then strictly safer than sending a pair that ages.'
+              : !anyWrongOk && !omittedOk
+                ? 'only our pair accepted -> the gate is real and required. The refusal\n' +
+                  '           text above is the signature to key an error message off.'
+                : 'mixed -> read the rows: whichever field a wrong value survives is\n' +
+                  '           the one beanfun does not check.'
+        }`,
+      );
+    }
+  }
+
+  // --- Can the pin be checked WITHOUT a ticket, or a session at all? ---------
+  // The sweep above proved the gate is real, which means the pin will one day
+  // stop being accepted and every user breaks together. Detecting that is the
+  // open problem: it is only observable by sending a v2 request, and a
+  // deployment whose users all sit on legacy games sends none — possibly for
+  // months, since the game a user picked is persisted and survives restarts.
+  //
+  // But every arm above carried a VALID ticket and still failed on integrity,
+  // so integrity is at least decided independently of what the ticket is worth.
+  // If it is also decided BEFORE the ticket is looked at, then a request
+  // carrying a deliberately worthless ticket still exercises the gate — and
+  // that would be a canary needing no real ticket, generating no OTP, and
+  // costing a user nothing.
+  //
+  // 2x2, because both halves have to hold for that to be true:
+  //   identity  ours vs wrong   — does the answer still distinguish them?
+  //   cookies   session vs none — is a login needed to reach the gate at all?
+  //
+  // The SN and ticket are random but WELL-FORMED (36-char GUID, 64 hex chars).
+  // Sending obvious garbage risks a shape rejection that would look like an
+  // answer to the ordering question without being one.
+  console.log('\n== v2 with a worthless ticket: is the gate reachable without one? ==');
+  {
+    const WRONG_CV = '9.9.9.9';
+    const WRONG_HASH = '0'.repeat(64);
+    const bogusSn = randomUUID();
+    const bogusTicket = randomBytes(32).toString('hex');
+    // A jar of its own, so nothing this client does can touch the real session's
+    // cookies — and so "no cookies" really means none, not merely unsent.
+    const anonClient = new BeanfunClient({ jar: new CookieJar() });
+
+    const bogusArms = [
+      { label: 'ours + session', cv: GGM_CV, hash: GGM_HASH, anon: false },
+      { label: 'wrong + session', cv: WRONG_CV, hash: WRONG_HASH, anon: false },
+      { label: 'ours + no cookies', cv: GGM_CV, hash: GGM_HASH, anon: true },
+      { label: 'wrong + no cookies', cv: WRONG_CV, hash: WRONG_HASH, anon: true },
+    ];
+
+    /** `Client_Integrity_Failed` or not — the only distinction that matters here. */
+    const integrityFailed: (boolean | null)[] = [];
+    for (const arm of bogusArms) {
+      const res = await (arm.anon ? anonClient : client).http.post(
+        `${TW.portalBase}beanfun_block/generic_handlers/get_webstart_otp_v2.ashx`,
+        {
+          headers: { referer: s1.url },
+          json: { SN: bogusSn, LaunchTicket: bogusTicket, CV: arm.cv, Hash: arm.hash, arch: GGM_ARCH },
+        },
+      );
+      const body = boundedText(res);
+      dump(`5_v2_bogus_${arm.label}.txt`.replace(/[\s+]+/g, '-'), body);
+      let note: string;
+      let flagged: boolean | null = null;
+      try {
+        const parsed = JSON.parse(body) as { result?: number; message?: string | null };
+        const message = String(parsed.message ?? '');
+        flagged = /Client_Integrity_Failed/i.test(message);
+        note = `result=${String(parsed.result)} message=${redactText(message).slice(0, 90)}`;
+      } catch {
+        note = `NON-JSON (HTTP ${res.statusCode}): ${redactText(body.slice(0, 90)).replace(/\s+/g, ' ')}`;
+      }
+      integrityFailed.push(flagged);
+      console.log(`  ${arm.label.padEnd(20)} -> ${note}`);
+    }
+
+    // Interpreting any of this assumes the pair we ship is good RIGHT NOW. If
+    // that was never established (legacy game, or the baseline arm failed),
+    // `ours` refusing here says nothing about ordering — it could simply be a
+    // pin that has already expired, which is the very thing we are building a
+    // detector for.
+    if (pinnedPairGoodNow !== true) {
+      console.log(
+        '  reading: WITHHELD — this run never confirmed the shipped pair is currently\n' +
+          '           accepted, so a refusal here cannot be told apart from an expired pin.\n' +
+          '           Re-run on a v2 game (SERVICE_CODE=610074 SERVICE_REGION=T9).',
+      );
+    } else {
+      const [oursSession, wrongSession, oursAnon, wrongAnon] = integrityFailed;
+      const sessionDistinguishes = oursSession === false && wrongSession === true;
+      const anonDistinguishes = oursAnon === false && wrongAnon === true;
+      if (sessionDistinguishes && anonDistinguishes) {
+        console.log(
+          '  reading: CANARY VIABLE, CREDENTIAL-FREE — the gate answers before the ticket\n' +
+            '           and without a login. A scheduled POST with a worthless ticket can ask\n' +
+            '           "is our pair still accepted?" without any user, session, or OTP.',
+        );
+      } else if (sessionDistinguishes) {
+        console.log(
+          '  reading: CANARY VIABLE, NEEDS A SESSION — the gate answers before the ticket,\n' +
+            '           but not to an anonymous caller. Usable from a live session without\n' +
+            '           burning a real ticket or generating an OTP.',
+        );
+      } else if (oursSession === true) {
+        console.log(
+          '  reading: NOT USABLE — a known-good pair is reported as Client_Integrity_Failed\n' +
+            '           once the ticket is worthless, so that message is a catch-all here and\n' +
+            '           cannot signal an expired pin. Detection has to stay on real traffic.',
+        );
+      } else {
+        console.log(
+          '  reading: INCONCLUSIVE — read the rows. The arms did not split the way either\n' +
+            '           hypothesis predicts; whatever distinguishes them is the next question.',
+        );
+      }
+    }
   }
 
   // The shipped code path, end to end. The one assumption the v2 port inherits

@@ -200,3 +200,6 @@ log 旁邊，所以多數情況你不需要自己跑。刻意**不做每日排�
 
 那次協定變動的完整排查記錄（含四次判斷錯誤）在
 [`docs/OTP-2026-08-17.md`](./docs/OTP-2026-08-17.md)。
+
+從掃 QR 到拿到 OTP 的完整請求鏈——每個 endpoint、每個參數的來源、以及 DES 出現的
+兩個位置——在 [`docs/PROTOCOL-FLOW.md`](./docs/PROTOCOL-FLOW.md)。

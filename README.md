@@ -226,6 +226,10 @@ All of it prints field names, lengths and hashes — never values. What each too
 was built to answer, and the four wrong turns it took to get there, are in
 [`docs/OTP-2026-08-17.md`](./docs/OTP-2026-08-17.md).
 
+The end-to-end request chain — every endpoint from the QR scan to the OTP, where
+each parameter comes from, and the two places DES appears — is in
+[`docs/PROTOCOL-FLOW.md`](./docs/PROTOCOL-FLOW.md).
+
 ## License & attribution
 
 MIT (see [`LICENSE`](./LICENSE)). This is a derivative work: the Beanfun protocol

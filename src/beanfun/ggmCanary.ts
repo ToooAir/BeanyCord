@@ -29,6 +29,13 @@
  * worthless ticket, no session, no user, no OTP produced, and an answer that
  * distinguishes "our pair is dead" from "our pair is fine".
  *
+ * TO RE-VERIFY THE WHOLE ALERT PATH: point `GGM_HASH` at 64 zeros and run
+ * `npm run check:ggm` (expect `rejected`, exit 1) and then `npm run bot` (expect
+ * the `[ggm]` line at startup and a DM to `OWNER_DISCORD_ID`). Put the real hash
+ * back afterwards. Verified this way on 2026-08-19 — which is also how the
+ * contradictory hedge in the combined line was found, since nothing but the real
+ * output shows what the operator actually reads.
+ *
  * THREE STATES, NOT TWO. `Invalid_Start_Ticket` is the only thing that proves
  * health; everything unrecognised is `inconclusive`, never healthy. A canary
  * that reads an unknown answer as "fine" reports success while measuring

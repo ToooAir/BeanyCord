@@ -13,7 +13,8 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { compareGgm, type GgmSources } from '../src/beanfun/ggmCheck.js';
+import type { CanaryResult } from '../src/beanfun/ggmCanary.js';
+import { combineGgm, compareGgm, type GgmSources } from '../src/beanfun/ggmCheck.js';
 
 const HASH_A = 'a'.repeat(64);
 const HASH_B = 'b'.repeat(64);
@@ -82,5 +83,56 @@ describe('compareGgm', () => {
   it('keeps the full hash out of the line', () => {
     // Public, but 64 characters of it per log line is noise.
     expect(compareGgm(sources()).line).not.toContain(HASH_A);
+  });
+});
+
+/**
+ * Folding the measurement in.
+ *
+ * The canary outranks the comparison because it asked the server instead of
+ * guessing from version strings — but "outranks" must not mean "replaces": when
+ * the pair is refused, the only actionable half of the answer (what to copy in)
+ * comes from upstream, and it has to survive into the same line.
+ */
+describe('combineGgm', () => {
+  const canary = (status: CanaryResult['status'], line = `canary says ${status}`): CanaryResult => ({
+    status,
+    line,
+  });
+
+  it('lets a refusal outrank a comparison that thinks everything is fine', () => {
+    const v = combineGgm(compareGgm(sources()), canary('rejected', 'beanfun REFUSES this pair'));
+    expect(v.status).toBe('rejected');
+    expect(v.line).toContain('REFUSES');
+  });
+
+  it('keeps upstream\'s pair in the refusal line — it is the fix', () => {
+    const comparison = compareGgm(sources({ upstream: { cv: '1.5.0.3', hash: HASH_B } }));
+    const v = combineGgm(comparison, canary('rejected'));
+    expect(v.status).toBe('rejected');
+    expect(v.line).toContain('1.5.0.3');
+    expect(v.line).toContain('clientIntegrity.ts');
+  });
+
+  it('turns a version difference into a PROVEN harmless one when the pair still works', () => {
+    // This is the whole reason to run the canary beside the comparison: on its
+    // own `compareGgm` can only hedge, because acceptance is not decidable from
+    // version strings. With a measurement it does not have to.
+    const comparison = compareGgm(sources({ beanfunVersion: '1.6.0.0' }));
+    expect(comparison.status).toBe('differs');
+    const v = combineGgm(comparison, canary('healthy', 'beanfun still accepts this pair'));
+    expect(v.status).toBe('accepted');
+    expect(v.line).toContain('currently harmless');
+    expect(v.line).toContain('1.6.0.0');
+  });
+
+  it('falls back to the comparison when the canary could not measure', () => {
+    // Degrading everything to `unknown` would throw away the one source that
+    // still had something to say.
+    const comparison = compareGgm(sources({ upstream: { cv: '1.5.0.3', hash: HASH_B } }));
+    const v = combineGgm(comparison, canary('inconclusive', 'canary got a non-JSON reply'));
+    expect(v.status).toBe('differs');
+    expect(v.line).toContain('1.5.0.3');
+    expect(v.line).toContain('non-JSON');
   });
 });

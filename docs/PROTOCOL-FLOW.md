@@ -337,10 +337,21 @@ Step 5  POST beanfun_block/generic_handlers/get_webstart_otp_v2.ashx
 
 `LaunchTicket` **不需要額外請求**：它就在 step 1 已經抓回來的那個頁面的 blob 裡。
 
-`result !== 1` 時，會在錯誤旁邊直接印出 GGM 版本比對結論（`ggmVerdict()`），因為那是
-「看不懂的拒絕」最可能的原因。伺服器的 `message` 只有在**還像個理由**時才轉述給
-使用者：單行、無標記、120 字元以內 —— 否則那個欄位可以塞進整頁 HTML，而那正是
-曾經把原始標記送進使用者私訊的原因。
+`result !== 1` 時，`message` 欄位帶著伺服器自己的拒絕理由。已知的兩個是 enum 風格的
+token，而且意思相反（見〈客戶端驗證〉）：
+
+| `message` | 我們拋的錯誤碼 | 意義 |
+| --- | --- | --- |
+| `Client_Integrity_Failed` | `otp.launcher_rejected` | **CV/Hash 被拒**，所有人一起壞 |
+| `Invalid_Start_Ticket` | `otp.ticket_rejected` | 身分**通過了**，是票的問題 |
+| 其他 | `otp.server_rejected` | 看不懂 —— 此時才印 `ggmVerdict()` |
+
+`ggmVerdict()` 只印在前者與「其他」旁邊。`Invalid_Start_Ticket` **不印**：身分檢查在票
+之前判定，所以這個回應本身就是身分通過的證明，印出來等於指控一個剛被伺服器放行的
+元件。
+
+伺服器的 `message` 只有在**還像個理由**時才轉述給使用者：單行、無標記、120 字元
+以內 —— 否則那個欄位可以塞進整頁 HTML，而那正是曾經把原始標記送進使用者私訊的原因。
 
 ---
 
@@ -380,16 +391,73 @@ arch = 呼叫端行程的位元數（x64 / x86）
 我們是無頭 Linux 服務，本機永遠不會有 GGM，所以常數是唯一來源 —— 實測**從未安裝過
 GGM 的非 Windows 主機也會被接受**。
 
-**只有 v2 會讀這三個值。** legacy GET 上的同一組實測不被讀取：三組只差這個 triple 的
-對照（省略 / 我們的釘選值 / 故意寫錯的 `CV=9.9.9.9` + 64 個 0）**全部回傳信封**。
-legacy 仍然照送，是為了讓請求形狀貼近官方啟動器（對風控較安全），不是因為必要。
+**只有 v2 會讀這三個值，而且讀得很嚴格。** 兩條路線都實測過（`npm run probe:otp`，
+每臂都重新抓一張新票，所以「票用過了」不可能冒充「身分被拒」）：
 
-> **實用推論：legacy 路線壞掉時，GGM 釘選值不是嫌疑犯。** 這也是為什麼
-> `ggmVerdict()` 印在 v2 拒絕旁邊，而不印在 legacy 旁邊。
->
-> 反過來，**v2 出現伺服器拒絕時先查這裡**：Gamania 一年換幾次 GGM，換版當天所有用
-> 編譯常數的人會一起壞。用 `npm run check:ggm` 對照上游的 `ggm-client.json`
-> 與 `CheckVersion.ashx`。
+| 送出的 triple | legacy GET (`600309_A2`) | v2 POST (`610074_T9`) |
+| --- | --- | --- |
+| 我們的釘選值 | 回傳信封 | **OK** |
+| 完全省略 | 回傳信封 | `Client_Integrity_Failed` |
+| 兩個都錯 | 回傳信封 | `Client_Integrity_Failed` |
+| 只有 `CV` 錯 | — | `Client_Integrity_Failed` |
+| 只有 `Hash` 錯 | — | `Client_Integrity_Failed` |
+
+也就是說 **v2 是必填、成對驗證**：換版當天不能只改版本號，兩個值必須一起換成同一個
+真實 build 的。legacy 仍然照送，是為了讓請求形狀貼近官方啟動器（對風控較安全），
+不是因為必要。
+
+> **實用推論：legacy 路線壞掉時，GGM 釘選值不是嫌疑犯。** 只有 v2 讀它。
+
+### 這組值會不會過期？直接問伺服器
+
+`src/beanfun/ggmCanary.ts`。上面那組實測還發現一件更有用的事：**身分檢查在票之前
+判定，而且不需要登入。**
+
+| 送出 | 回應 |
+| --- | --- |
+| 廢票 + 我們的 pair + session cookie | `Invalid_Start_Ticket` |
+| 廢票 + 錯的 pair + session cookie | `Client_Integrity_Failed` |
+| 廢票 + 我們的 pair + **完全沒有 cookie** | `Invalid_Start_Ticket` |
+| 廢票 + 錯的 pair + **完全沒有 cookie** | `Client_Integrity_Failed` |
+
+所以只要送一個**帶著隨機廢票**的 POST，就能問出「我們這組還被接受嗎」——不需要
+使用者、不需要 session、不消耗真票、不產生任何 OTP。
+
+這解掉了原本無解的偵測問題：**使用者選的遊戲會被持久化並跨重啟保留**，所以一個大家
+都停在 legacy 遊戲的部署可能好幾個月不發任何 v2 請求，換版壞掉的第一個訊號會是一個
+說不清楚發生什麼事的使用者。
+
+canary 是**三態，不是兩態**：
+
+```
+Invalid_Start_Ticket     → healthy
+Client_Integrity_Failed  → rejected（警報）
+其他任何東西             → inconclusive，絕不當成健康
+```
+
+第三態是重點。把不認識的回應讀成「健康」的檢查，會在 beanfun 改字串或 WAF 回一頁
+HTML 之後，永遠回報成功卻什麼都沒量到 —— `isLoggedOutEcho` 就是這樣在 production
+活了好幾週。
+
+**因此這個檢查值得排程，而版本比對不值得。** 版本不同不是故障（beanfun 可能繼續接受
+舊的很久），但被拒絕就是故障本身。`bot.ts` 在啟動時與每 24 小時跑一次，只有在
+`rejected` 時才 DM `OWNER_DISCORD_ID`，而且**一次故障只講一次**，不會每天重複到被
+無視。
+
+`npm run check:ggm` 現在會把四個來源一起印出來：
+
+```
+local     cv=1.5.0.2 hash=dfd568a6… arch=x64
+upstream  cv=1.5.0.2 hash=dfd568a6…
+beanfun   version=1.5.0.2
+canary    healthy — beanfun still accepts this pair (refused only the throwaway ticket)
+
+[accepted] …
+```
+
+canary 的答案**壓過**其他三個：版本差異只是對「還接不接受」的猜測，canary 是直接問。
+比對仍然照跑，因為「被拒絕了」只是半個答案，另外半個——**要換成什麼**——只有上游的
+`ggm-client.json` 答得出來。
 
 ---
 
@@ -424,7 +492,7 @@ GET tw.beanfun.com/beanfun_block/generic_handlers/echo_token.ashx?webtoken=1
 | --- | --- |
 | `npm run probe:otp [-- --write]` | 連線跑完整條鏈並加裝儀表，含 step 5 的輸入來源掃描。`-- --list-games` 列出目錄；`SERVICE_CODE=… SERVICE_REGION=…` 可**不重新登入**探測任一款遊戲 |
 | `npm run analyze:launch` | 對擷取到的 blob 離線窮舉表 / 方向 / offset |
-| `npm run check:ggm` | 比對釘選的 `CV`/`Hash` 與上游 `ggm-client.json`（分支 `code`）及 `CheckVersion.ashx` |
+| `npm run check:ggm` | **問伺服器我們的 `CV`/`Hash` 還接不接受**，並比對上游 `ggm-client.json`（分支 `code`）與 `CheckVersion.ashx` |
 | `npm run capture` | 擷取真實回應，之後離線反覆迭代 |
 
 執行中的 bot 每次取密碼會印一行路線判定：

@@ -24,6 +24,7 @@ vi.mock('../src/beanfun/ggmCheck.js', () => ({ ggmVerdict }));
 
 import type { BeanfunClient } from '../src/beanfun/client.js';
 import { GGM_CV, GGM_HASH } from '../src/beanfun/clientIntegrity.js';
+import { CLIENT_INTEGRITY_FAILED, INVALID_START_TICKET } from '../src/beanfun/ggmCanary.js';
 import { getOtp } from '../src/beanfun/otp.js';
 import { encryptHex } from '../src/beanfun/wcdes.js';
 import {
@@ -206,6 +207,39 @@ describe('getOtp — v2 route', () => {
 
     expect(ggmVerdict).toHaveBeenCalled();
     expect(logged.join('\n')).toContain('STUB VERDICT');
+  });
+
+  it('names an integrity refusal as its own failure, and asks the GGM question', async () => {
+    // Measured 2026-08-19: this is the wording beanfun uses when it will not
+    // accept the CV/Hash we compile in — a failure that breaks every user at
+    // once and that no amount of re-logging in can fix. Folding it into the
+    // generic `otp.server_rejected` is what made it unrecognisable.
+    const { client } = recordingClient(MIGRATED_PAGE, {
+      result: 0,
+      data: null,
+      message: CLIENT_INTEGRITY_FAILED,
+    });
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toMatchObject({
+      code: 'otp.launcher_rejected',
+    });
+    expect(logged.join('\n')).toContain('STUB VERDICT');
+  });
+
+  it('does NOT blame the launcher identity when only the ticket was refused', async () => {
+    // The same run showed the identity is checked BEFORE the ticket: a request
+    // carrying a good pair and a worthless ticket is told `Invalid_Start_Ticket`.
+    // So this message is proof the pair was ACCEPTED, and printing the GGM
+    // verdict beside it would accuse a component the server just cleared.
+    const { client } = recordingClient(MIGRATED_PAGE, {
+      result: 0,
+      data: null,
+      message: INVALID_START_TICKET,
+    });
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toMatchObject({
+      code: 'otp.ticket_rejected',
+    });
+    expect(ggmVerdict).not.toHaveBeenCalled();
+    expect(logged.join('\n')).not.toContain('STUB VERDICT');
   });
 
   it("surfaces the server's own refusal", async () => {

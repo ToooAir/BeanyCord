@@ -11,11 +11,12 @@
  */
 import 'dotenv/config';
 
-import { compareGgm, readGgmSources } from '../beanfun/ggmCheck.js';
+import { runGgmCanary } from '../beanfun/ggmCanary.js';
+import { combineGgm, compareGgm, readGgmSources } from '../beanfun/ggmCheck.js';
 
 async function main(): Promise<void> {
-  const sources = await readGgmSources();
-  const verdict = compareGgm(sources);
+  const [sources, canary] = await Promise.all([readGgmSources(), runGgmCanary()]);
+  const verdict = combineGgm(compareGgm(sources), canary);
 
   console.log(`local     cv=${sources.local.cv} hash=${sources.local.hash} arch=${sources.local.arch}`);
   console.log(
@@ -24,13 +25,16 @@ async function main(): Promise<void> {
       : 'upstream  <unavailable>',
   );
   console.log(`beanfun   version=${sources.beanfunVersion ?? '<unavailable>'}`);
+  // The one line here that is a measurement rather than a comparison.
+  console.log(`canary    ${canary.status} — ${canary.line}`);
   for (const p of sources.problems) console.log(`          ! ${p}`);
 
   console.log(`\n[${verdict.status}] ${verdict.line}`);
 
   // `differs` is information, not an outage: beanfun may keep accepting the old
-  // pair for a long time. Only a genuinely unusable answer is worth an exit code.
-  if (verdict.status === 'unknown') process.exitCode = 1;
+  // pair for a long time — and when the canary says `accepted`, that is no
+  // longer even a guess. A refusal, on the other hand, IS the outage.
+  if (verdict.status === 'rejected' || verdict.status === 'unknown') process.exitCode = 1;
 }
 
 main().catch((e: unknown) => {

@@ -51,6 +51,7 @@ import {
 import { GGM_ARCH, GGM_CV, GGM_HASH } from './clientIntegrity.js';
 import { TW } from './endpoints.js';
 import { BeanfunError } from './errors.js';
+import { CLIENT_INTEGRITY_FAILED, INVALID_START_TICKET } from './ggmCanary.js';
 import { ggmVerdict } from './ggmCheck.js';
 import { decodeLaunchFields, decodeLaunchTicket, type LaunchFields } from './launchData.js';
 import {
@@ -374,14 +375,37 @@ async function step5PostOtpV2(
   }
 
   if (parsed.result !== 1) {
-    // The pinned launcher identity is the likeliest reason for a refusal whose
-    // wording we cannot interpret, so answer that question here — beside the
-    // failure — rather than leaving someone to correlate it later. Cached, and
-    // it cannot throw.
+    const reason = parsed.message?.trim() ?? '';
+
+    // Measured 2026-08-19: this endpoint names its two refusals, and they mean
+    // opposite things about the pinned launcher identity. Reporting them as one
+    // `otp.server_rejected` threw that away — and printing the GGM verdict
+    // beside BOTH accused the pin of a failure it is provably not responsible
+    // for, since the identity is checked BEFORE the ticket (a request carrying a
+    // worthless ticket and a good pair is told `Invalid_Start_Ticket`).
+    if (reason.includes(CLIENT_INTEGRITY_FAILED)) {
+      console.error(`[ggm] ${(await ggmVerdict()).line}`);
+      throw new BeanfunError(
+        'otp.launcher_rejected',
+        'beanfun rejected the launcher identity (CV/Hash) this build sends — it is out of date',
+      );
+    }
+    if (reason.includes(INVALID_START_TICKET)) {
+      // Not the pin. The ticket came off the page we just fetched, so this is a
+      // stale or already-redeemed handoff, or a decode that produced a
+      // well-formed value that is not the real ticket.
+      throw new BeanfunError(
+        'otp.ticket_rejected',
+        'beanfun rejected the launch ticket from this page (identity accepted)',
+      );
+    }
+
+    // Unrecognised: the pin is once again the likeliest explanation we cannot
+    // read, so answer that question here rather than leaving it to be
+    // correlated later. Cached, and it cannot throw.
     console.error(`[ggm] ${(await ggmVerdict()).line}`);
     // Prefer the server's own wording; fall back to the code so the failure is
     // never reported as an empty string.
-    const reason = parsed.message?.trim();
     throw new BeanfunError(
       'otp.server_rejected',
       reason ? rejectionReason(reason) : `result=${String(parsed.result)}`,

@@ -3,15 +3,20 @@
  *
  * `clientIntegrity.ts` pins a `CV`/`Hash` pair describing a Gamania Games
  * Manager build. Gamania ships a new one a few times a year, and when Beanfun
- * stops accepting the old pair, everyone pinning it breaks together — with a
- * server refusal whose wording we have never seen and cannot count on being
- * legible.
+ * stops accepting the old pair, everyone pinning it breaks together.
  *
- * So this answers the question at the moment it is asked, from three sources:
+ * This answers the question from four sources:
  *
+ *   canary    whether beanfun still accepts it   (`ggmCanary.ts`)
  *   local     what we send                       (`clientIntegrity.ts`)
  *   upstream  a maintained pair                  (pungin/Beanfun `ggm-client.json`)
  *   beanfun   the build it currently ships       (`CheckVersion.ashx`)
+ *
+ * The canary is the only one that measures the thing that actually matters, and
+ * it outranks the other three: a version difference is a guess about acceptance,
+ * while the canary asks the server. The comparison still runs alongside it,
+ * because when the answer is "refused" the next question is "refused, and what
+ * do I copy in?" — which only upstream can answer.
  *
  * Upstream is the one worth trusting for the hash: they run an hourly watcher on
  * `CheckVersion.ashx` and, when the version moves, a Windows runner that
@@ -20,17 +25,19 @@
  * innoextract cannot do — and a hash we got wrong would fail exactly like a
  * stale one while looking fixed.
  *
- * Deliberately NOT a monitor. A version bump is not a failure: Beanfun may keep
- * accepting the old pair indefinitely, so a daily check would report a
- * difference every day while everything worked, and be ignored by the time it
- * mattered. This runs where the answer is actually needed — on a refusal, at
- * startup, or by hand.
+ * The COMPARISON is deliberately not a monitor, and that has not changed: a
+ * version bump is not a failure, beanfun may keep accepting the old pair
+ * indefinitely, and a daily report of a harmless difference is a check nobody
+ * reads by the time it matters. What changed is that the canary measures the
+ * failure itself rather than a leading indicator, so scheduling *that* (see
+ * `bot.ts`) only ever speaks when something is genuinely broken.
  */
 import got from 'got';
 
 import { safeError } from '../core/redact.js';
 import { USER_AGENT } from './client.js';
 import { GGM_ARCH, GGM_CV, GGM_HASH } from './clientIntegrity.js';
+import { runGgmCanary, type CanaryResult } from './ggmCanary.js';
 
 /** Beanfun's own announcement of the build it ships. ~80 bytes. */
 const CHECK_VERSION_URL = 'https://tw.beanfun.com/generic_handlers/CheckVersion.ashx';
@@ -56,13 +63,25 @@ export interface GgmSources {
 
 export interface GgmVerdict {
   /**
-   * `aligned`   — all three agree; this pair is not the suspect.
+   * Measured by the canary (outranks the three below):
+   * `accepted`  — beanfun still takes this pair. It is not the suspect, full stop.
+   * `rejected`  — beanfun refuses it. Every v2 OTP is failing for everyone.
+   *
+   * Inferred from comparing sources, when the canary could not say:
+   * `aligned`   — all three agree; probably not the suspect.
    * `differs`   — something moved; the line says what and what to do.
    * `unknown`   — could not reach enough sources to say.
    */
-  status: 'aligned' | 'differs' | 'unknown';
+  status: 'accepted' | 'rejected' | 'aligned' | 'differs' | 'unknown';
   /** One line, ready to log. */
   line: string;
+}
+
+/** How loudly a verdict deserves to be said. */
+export function ggmSeverity(status: GgmVerdict['status']): 'error' | 'warn' | 'info' {
+  if (status === 'rejected') return 'error';
+  if (status === 'accepted' || status === 'aligned') return 'info';
+  return 'warn';
 }
 
 /** Short, non-secret fingerprint — the hash is public, but 64 chars in a log is noise. */
@@ -124,6 +143,41 @@ export function compareGgm(s: GgmSources): GgmVerdict {
     status: hasRealDiff ? 'differs' : 'unknown',
     line: `${pinned}; ${notes.join('; ')}${hasRealDiff ? ' (a difference alone does not mean it is rejected)' : ''}`,
   };
+}
+
+/**
+ * Fold the measurement into the comparison. Pure, for the same reason
+ * `compareGgm` is.
+ *
+ * The canary wins wherever it has an opinion, because it is the only source
+ * that asked the server. The comparison is not discarded even then: "refused"
+ * is only half an answer, and the other half — what to copy in — lives in
+ * upstream's published pair.
+ *
+ * An `inconclusive` canary falls back to the comparison rather than degrading
+ * everything to `unknown`: the version sources may still have something useful
+ * to say, and saying "we could not measure, but here is what the versions look
+ * like" beats saying nothing.
+ */
+export function combineGgm(comparison: GgmVerdict, canary: CanaryResult): GgmVerdict {
+  if (canary.status === 'rejected') {
+    // Lead with the measurement, follow with the fix. The comparison line names
+    // upstream's pair, which is what someone reading this needs next.
+    return { status: 'rejected', line: `${canary.line}. ${comparison.line}` };
+  }
+  if (canary.status === 'healthy') {
+    // A version difference that the server still accepts is *proven* harmless,
+    // which is a far stronger statement than the hedge `compareGgm` has to make
+    // on its own — and it is the whole reason to run the canary beside it.
+    return {
+      status: 'accepted',
+      line:
+        comparison.status === 'differs'
+          ? `${canary.line} — so the difference below is currently harmless. ${comparison.line}`
+          : canary.line,
+    };
+  }
+  return { status: comparison.status, line: `${comparison.line}; ${canary.line}` };
 }
 
 async function fetchJson(url: string): Promise<unknown> {
@@ -188,7 +242,13 @@ export async function ggmVerdict(force = false): Promise<GgmVerdict> {
   if (!force && cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.verdict;
   let verdict: GgmVerdict;
   try {
-    verdict = compareGgm(await readGgmSources());
+    // Concurrently: the canary talks to beanfun, the comparison to GitHub and
+    // beanfun. Neither depends on the other's answer.
+    const [comparison, canary] = await Promise.all([
+      readGgmSources().then(compareGgm),
+      runGgmCanary(),
+    ]);
+    verdict = combineGgm(comparison, canary);
   } catch (e) {
     verdict = { status: 'unknown', line: `check failed: ${safeError(e)}` };
   }

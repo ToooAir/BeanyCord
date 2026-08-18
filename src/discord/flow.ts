@@ -667,6 +667,19 @@ function sessionDeadMessage(): BaseMessageOptions {
  *  redacted reason, never the raw server body (which can be a full HTML page).
  *  Session-death and confirmed-alive cases are handled by `payloadFor`. */
 function otpFailureMessage(e: unknown): BaseMessageOptions {
+  // Not the user's problem, and no amount of re-logging in will fix it: beanfun
+  // has stopped accepting the launcher identity this build is compiled with, so
+  // every user is failing at once and the operator has to ship a new pair.
+  // Offering the relogin button here would send everyone through a QR scan that
+  // cannot possibly help — which is worse than saying nothing.
+  if (e instanceof BeanfunError && e.code === 'otp.launcher_rejected') {
+    return {
+      content:
+        '❌ **取得 OTP 失敗**\n' +
+        'Beanfun 不再接受這個版本送出的啟動器識別(CV/Hash),需要更新後才能取得密碼。\n\n' +
+        '-# 這不是你的帳號或登入問題,重新登入無法解決 — 請聯絡管理員。',
+    };
+  }
   return {
     content:
       '❌ **取得 OTP 失敗**\n' +

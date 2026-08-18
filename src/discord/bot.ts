@@ -14,6 +14,7 @@ import {
   type Interaction,
 } from 'discord.js';
 
+import { ggmSeverity, ggmVerdict } from '../beanfun/ggmCheck.js';
 import { FailureLockout } from '../core/guard.js';
 import { redactText } from '../core/redact.js';
 import { SessionManager } from '../core/sessionManager.js';
@@ -40,6 +41,82 @@ import { formatUptime, startPresenceRotation } from './presence.js';
 
 /** Process start, for uptime in the presence rotation and /status. */
 const STARTED_AT = Date.now();
+
+/**
+ * How often to ask beanfun whether the launcher identity we compile in is still
+ * accepted. It changes a few times a year, so daily is generous — the interval
+ * exists so the answer is never older than a day, not to catch a fast-moving
+ * value.
+ */
+const IDENTITY_WATCH_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * Watch the one failure that breaks every user at once.
+ *
+ * `ggmCanary.ts` explains why this is schedulable at all: the check measures
+ * whether beanfun still accepts our `CV`/`Hash`, rather than whether some
+ * version string somewhere has moved. A version difference is not an outage and
+ * a daily report of one is a check nobody reads; a refusal IS the outage.
+ *
+ * Nothing about it needs a user: no session, no ticket, no OTP produced. Which
+ * is the point — a deployment whose users all sit on legacy games sends no v2
+ * requests at all, possibly for months, since the game someone picked is
+ * persisted and survives restarts. Without this, the first sign would be a
+ * confused user with no way to describe what broke.
+ *
+ * Announced ONCE per outage, not once per tick: a refusal stays true until
+ * someone ships a new pair, and re-sending that daily is how a real alert
+ * becomes background noise. It re-arms if the status ever leaves `rejected`.
+ */
+function startIdentityWatch(client: Client): void {
+  const ownerId = (process.env.OWNER_DISCORD_ID ?? '').trim();
+  let announced = false;
+
+  const tick = async (): Promise<void> => {
+    const v = await ggmVerdict();
+    const say = { error: console.error, warn: console.warn, info: console.log }[ggmSeverity(v.status)];
+    say(`[ggm] ${v.line}`);
+
+    if (v.status !== 'rejected') {
+      announced = false;
+      return;
+    }
+    if (announced) return;
+    announced = true;
+
+    if (!ownerId) {
+      console.error(
+        '[ggm] nobody was told: set OWNER_DISCORD_ID to receive this as a DM instead of ' +
+          'only in the log, where an unattended host will not surface it.',
+      );
+      return;
+    }
+    try {
+      const dm = await (await client.users.fetch(ownerId)).createDM();
+      await dm.send(
+        '🚨 **Beanfun 不再接受這個部署送出的啟動器識別(CV/Hash)**\n' +
+          '走 v2 路線的遊戲(例如新楓之谷)現在對**所有使用者**都取不到密碼。\n\n' +
+          `\`\`\`\n${v.line}\n\`\`\`\n` +
+          '請更新 `src/beanfun/clientIntegrity.ts` 的 `GGM_CV` / `GGM_HASH` 後重新部署。\n' +
+          '-# 用 `npm run check:ggm` 確認新的一組是否被接受。',
+      );
+    } catch (e) {
+      // The DM failing must not silence the finding — the log line above already
+      // carries it, so just say the delivery failed.
+      console.error(`[ggm] could not DM ${ownerId}:`, redactText(e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  // Nothing in `tick` is expected to reject — `ggmVerdict` swallows its own
+  // failures and the DM is wrapped — but an unhandled rejection from a
+  // background timer takes the whole bot down, which is a steep price for a
+  // check that exists to be non-critical.
+  const safeTick = (): void => void tick().catch((e: unknown) => {
+    console.error('[ggm] watch tick failed:', redactText(e instanceof Error ? e.message : String(e)));
+  });
+  safeTick();
+  setInterval(safeTick, IDENTITY_WATCH_MS).unref();
+}
 
 /**
  * Access control. The gate exists only to stop strangers using *this host* to
@@ -144,6 +221,7 @@ export async function createBot(token: string): Promise<Client> {
   client.once('clientReady', (c) => {
     console.log(`🤖 logged in as ${c.user.tag}`);
     startPresenceRotation(c, STARTED_AT);
+    startIdentityWatch(c);
     if (access.requiredGuildId && !c.guilds.cache.has(access.requiredGuildId)) {
       console.warn(
         `[auth] REQUIRED_GUILD_ID ${access.requiredGuildId} is not a server this bot is in — ` +

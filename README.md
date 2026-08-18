@@ -216,11 +216,23 @@ npm run capture -- alive|dead  # per-endpoint responses for a session you contro
 npm run check:ggm           # is the launcher identity we send still the accepted one
 ```
 
-`check:ggm` is a diagnostic, not a monitor: it compares our pinned `CV`/`Hash`
-against upstream's maintained pair and against the build beanfun says it ships.
-The same check runs at startup and beside a v2 refusal, so the answer is usually
-already in the log. It is deliberately **not** scheduled — a version difference
-is not an outage, and a daily report of one is a monitor nobody reads.
+`check:ggm` asks beanfun outright whether the `CV`/`Hash` we send is still
+accepted, and compares it against upstream's maintained pair and the build
+beanfun says it ships. The measurement outranks the comparison: a version
+difference is a guess about acceptance, and the canary asks the server.
+
+That canary is one POST carrying a deliberately worthless launch ticket. The
+endpoint checks the launcher identity *before* the ticket, and does so for an
+anonymous caller — so `Client_Integrity_Failed` vs `Invalid_Start_Ticket`
+answers "is our pair dead?" with no session, no user, and no OTP produced.
+
+Which is why this one **is** scheduled (daily, plus at startup) while the version
+comparison never was: it observes the outage itself rather than a leading
+indicator, so it stays silent until something is genuinely broken. Set
+`OWNER_DISCORD_ID` to be DM'd once — not once a day — when it is. Without it,
+nothing would notice: the game a user picked is persisted and survives restarts,
+so a deployment sitting on legacy games can go months without sending a single
+v2 request, and the first sign would be a confused user.
 
 All of it prints field names, lengths and hashes — never values. What each tool
 was built to answer, and the four wrong turns it took to get there, are in

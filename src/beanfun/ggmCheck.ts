@@ -84,6 +84,14 @@ export function ggmSeverity(status: GgmVerdict['status']): 'error' | 'warn' | 'i
   return 'warn';
 }
 
+/**
+ * The hedge `compareGgm` has to add, because acceptance is not decidable from
+ * version strings. A shared constant rather than a literal, so `combineGgm` can
+ * drop it when the canary HAS decided and the two would otherwise contradict
+ * each other in one line.
+ */
+const DIFF_HEDGE = ' (a difference alone does not mean it is rejected)';
+
 /** Short, non-secret fingerprint — the hash is public, but 64 chars in a log is noise. */
 function shortHash(h: string): string {
   return `${h.slice(0, 8)}…`;
@@ -141,7 +149,7 @@ export function compareGgm(s: GgmSources): GgmVerdict {
   const hasRealDiff = notes.some((n) => n.startsWith('upstream publishes') || n.startsWith('beanfun ships'));
   return {
     status: hasRealDiff ? 'differs' : 'unknown',
-    line: `${pinned}; ${notes.join('; ')}${hasRealDiff ? ' (a difference alone does not mean it is rejected)' : ''}`,
+    line: `${pinned}; ${notes.join('; ')}${hasRealDiff ? DIFF_HEDGE : ''}`,
   };
 }
 
@@ -162,8 +170,11 @@ export function compareGgm(s: GgmSources): GgmVerdict {
 export function combineGgm(comparison: GgmVerdict, canary: CanaryResult): GgmVerdict {
   if (canary.status === 'rejected') {
     // Lead with the measurement, follow with the fix. The comparison line names
-    // upstream's pair, which is what someone reading this needs next.
-    return { status: 'rejected', line: `${canary.line}. ${comparison.line}` };
+    // upstream's pair, which is what someone reading this needs next — but its
+    // hedge has to go: "a difference alone does not mean it is rejected" is true
+    // on its own and flatly contradictory three words after "beanfun REFUSES
+    // this pair". This is the line someone reads during the outage.
+    return { status: 'rejected', line: `${canary.line}. ${comparison.line.replace(DIFF_HEDGE, '')}` };
   }
   if (canary.status === 'healthy') {
     // A version difference that the server still accepts is *proven* harmless,

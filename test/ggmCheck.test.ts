@@ -114,6 +114,17 @@ describe('combineGgm', () => {
     expect(v.line).toContain('clientIntegrity.ts');
   });
 
+  it('drops the comparison\'s hedge when the canary has already decided', () => {
+    // "a difference alone does not mean it is rejected" is true on its own and
+    // contradicts the sentence it would be appended to. Caught by reading the
+    // real output of a deliberately-broken pin, not by review.
+    const comparison = compareGgm(sources({ upstream: { cv: '1.5.0.3', hash: HASH_B } }));
+    expect(comparison.line).toContain('does not mean it is rejected');
+    const v = combineGgm(comparison, canary('rejected', 'beanfun REFUSES this pair'));
+    expect(v.line).not.toContain('does not mean it is rejected');
+    expect(v.line).toContain('1.5.0.3'); // the fix survives the trim
+  });
+
   it('turns a version difference into a PROVEN harmless one when the pair still works', () => {
     // This is the whole reason to run the canary beside the comparison: on its
     // own `compareGgm` can only hedge, because acceptance is not decidable from

@@ -51,12 +51,28 @@ export async function initQrLogin(client: BeanfunClient, skey: string): Promise<
 
   const deepRaw = data?.DeepLink ?? '';
   const deeplink = deepRaw ? normalizeDeeplink(deepRaw) || null : null;
+  const appLink = deeplink ? appLinkFromDeeplink(deeplink) : null;
+
+  // The app link is the only usable path on a phone — the QR is unscannable on
+  // the screen it is displayed on, and Discord shows the raw `gameplapp://`
+  // scheme as text nobody can even select. So losing it degrades mobile login to
+  // "install the desktop client", and it can be lost silently: the link is built
+  // from a scheme and path that beanfun controls and could rename. Say so here
+  // rather than letting a missing button be the only symptom.
+  if (deeplink && !appLink) {
+    console.warn(
+      `[login] DeepLink (${deeplink.length} chars) is not the shape the Beanfun app claims, ` +
+        `so the QR message has no tappable button — mobile users have no way through. ` +
+        `Re-check the manifests named in parser.ts::appLinkFromDeeplink. Scheme seen: ` +
+        `${deeplink.split(':')[0] ?? '<none>'}:`,
+    );
+  }
 
   return {
     skey,
     bitmapBase64: `data:image/png;base64,${raw}`,
     deeplink: deeplink && deeplink !== '' ? deeplink : null,
-    appLink: deeplink ? appLinkFromDeeplink(deeplink) : null,
+    appLink,
     verificationToken,
   };
 }

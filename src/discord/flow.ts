@@ -204,23 +204,24 @@ export async function handleLoginRefresh(
 
 /** Discord's cap on a link button's URL. Longer and the API rejects the message. */
 const MAX_BUTTON_URL = 512;
-/** Discord's cap on an embed field value; the fenced deep link must fit inside. */
-const MAX_FIELD_VALUE = 1024;
 
 /**
  * The QR message.
  *
  * On a phone the QR code is useless — you cannot scan the screen you are
- * holding — so the deep link is the whole flow there, not a footnote. It used to
- * arrive as bare `gameplapp://…` text, which Discord will not linkify, leaving
- * the user to select ~400 characters by hand and paste them into a browser.
+ * holding — so the deep link is the whole flow there, not a footnote. Beanfun
+ * hands out `gameplapp://…`, which Discord will not linkify;
  * `appLinkFromDeeplink` turns it into the https app link the Beanfun app claims,
- * which a link button can carry.
+ * which a link button can carry. Confirmed on iOS: the button hands off to the
+ * app.
  *
- * The raw scheme stays, fenced so a tap copies it, because a link button is not
- * guaranteed to hand off: an in-app browser can swallow a universal link and
- * show the landing page instead. Then pasting is still the way through, and it
- * is the one route already known to work.
+ * The raw scheme is deliberately NOT shown as a fallback. It was, fenced, on the
+ * theory that a tap would copy it — but embed text cannot be selected on mobile
+ * at all, so it copied nowhere. And there was nobody left for it to serve: on
+ * desktop you scan the QR, and a phone without the app needs the app rather than
+ * a string. That left ~360 characters of noise pushing the QR image down the
+ * message. When the button is missing the answer is a log line (see
+ * `qrInit.ts`), not a control the user cannot operate.
  */
 function buildQrPayload(init: QrLoginInit): BaseMessageOptions {
   const b64 = init.bitmapBase64.replace(/^data:image\/png;base64,/, '');
@@ -234,18 +235,6 @@ function buildQrPayload(init: QrLoginInit): BaseMessageOptions {
         (appLink ? '\n**手機上請改按下方的「📱 用 App 開啟」** — 自己的螢幕掃不到自己。' : ''),
     )
     .setImage('attachment://qr.png');
-
-  if (init.deeplink) {
-    // Fenced: on mobile a tap on a code block offers "copy", which is the
-    // difference between this being usable and being a wall of text.
-    const fenced = `\`\`\`\n${init.deeplink}\n\`\`\``;
-    if (fenced.length <= MAX_FIELD_VALUE) {
-      embed.addFields({
-        name: appLink ? '按鈕沒反應時的備援 (複製後貼到瀏覽器網址列)' : '或複製這串貼到瀏覽器網址列',
-        value: fenced,
-      });
-    }
-  }
 
   const buttons: ButtonBuilder[] = [];
   if (appLink) {

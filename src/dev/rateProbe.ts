@@ -50,6 +50,8 @@
  *   npm run probe:rate -- --go --arm=poll    # arm 2: poll one QR until refused
  *   npm run probe:rate -- --go --arm=hammer --target=echo --burst=60  # the ping herd, as it really lands
  *   npm run probe:rate -- --go --only=key --gap=90000 --accel=0.75   # staircase for the sustainable rate
+ *   npm run probe:rate -- --go --arm=window --after=100             # one window trial at D=100s
+ *   npm run probe:rate -- --go --arm=window --search --lo=60 --hi=300
  *   npm run probe:rate -- --go --max=50 --gap=250
  *   npm run probe:rate -- --go --write       # also dump every probe to capture/rate/
  *   npm run probe:rate -- --go --recheck=60 --wait=3600
@@ -87,6 +89,13 @@ const TARGET = opt('target') ?? 'echo';
 const ACCEL = Number(opt('accel') ?? '1');
 const STEP = num('step', 5);
 const BURST = Math.max(1, num('burst', 1));
+const QUOTA_HINT = Math.max(1, num('quota', 4));
+const AFTER_S = num('after', 90);
+const SEARCH = has('--search');
+const LO_S = num('lo', 60);
+const HI_S = num('hi', 300);
+const TOL_S = Math.max(1, num('tol', 10));
+const SETTLE_S = num('settle', 0);
 const MIN_GAP_MS = 250;
 const MAX = num('max', 30);
 const GAP_MS = num('gap', 0);
@@ -680,6 +689,119 @@ function armHammer(): Promise<Probe | null> {
 }
 
 /**
+ * Find the counting window's WIDTH, without the penalty hiding it.
+ *
+ * "How long after a refusal does it clear" cannot answer this: a refusal starts
+ * a fixed 4-5 minute penalty, and that penalty is what the recovery measures.
+ * The window has to be probed from below instead — fill the quota, wait, and
+ * see whether one more is still refused:
+ *
+ *   fill Q mints back to back, then send one more D seconds after the FIRST
+ *     refused  => the first is still counted     => W >= D
+ *     allowed  => the first has aged out         => W <  D
+ *
+ * So D's flip point IS the window. The fill also calibrates Q for free: if it is
+ * refused partway, the real quota is however many got through, which is worth
+ * knowing on its own — a production refusal on 2026-08-19 was consistent either
+ * with a quota of 3 or a window past 90s, and this separates them.
+ */
+async function fillQuota(quota: number): Promise<{ at: number[]; refusedAt: Probe | null }> {
+  const at: number[] = [];
+  for (let i = 1; i <= quota; i++) {
+    const { probe } = await stepSessionKey(new BeanfunClient());
+    console.log(line(i, probe));
+    if (!probe.healthy) return { at, refusedAt: probe };
+    at.push(Date.now());
+  }
+  return { at, refusedAt: null };
+}
+
+interface WindowTrial {
+  afterS: number;
+  filled: number;
+  refused: boolean | null;
+}
+
+async function windowTrial(afterS: number, quota: number): Promise<WindowTrial> {
+  console.log(`\n--- trial: fill ${quota}, then one more ${afterS}s after the first ---`);
+  const { at, refusedAt } = await fillQuota(quota);
+
+  if (refusedAt) {
+    console.log(`\n>>> refused while still FILLING, after ${at.length} mints.`);
+    console.log(`    The quota on this address is ${at.length}, not ${quota}. Re-run with --quota=${at.length}.`);
+    return { afterS, filled: at.length, refused: null };
+  }
+
+  const first = at[0]!;
+  const fireAt = first + afterS * 1_000;
+  const wait = fireAt - Date.now();
+  if (wait < 0) {
+    console.log(`\n>>> the fill itself took ${((Date.now() - first) / 1_000).toFixed(1)}s, past --after=${afterS}.`);
+    console.log('    Nothing to measure; raise --after.');
+    return { afterS, filled: at.length, refused: null };
+  }
+  console.log(`\nfilled in ${((at[at.length - 1]! - first) / 1_000).toFixed(1)}s; holding ${(wait / 1_000).toFixed(1)}s...`);
+  await sleep(wait);
+
+  const { probe } = await stepSessionKey(new BeanfunClient());
+  const now = Date.now();
+  console.log(line(quota + 1, probe));
+
+  console.log('\n  #   minted at   gap(s)   age at the probe(s)');
+  at.forEach((t, i) => {
+    const gap = i === 0 ? '    —' : ((t - at[i - 1]!) / 1_000).toFixed(1).padStart(5);
+    console.log(`  ${String(i + 1).padStart(2)}  ${((t - first) / 1_000).toFixed(1).padStart(9)}  ${gap}   ${((now - t) / 1_000).toFixed(1).padStart(10)}`);
+  });
+
+  const refused = !probe.healthy;
+  console.log('');
+  if (refused) {
+    console.log(`>>> REFUSED at D=${afterS}s — the first mint still counts. W >= ${afterS}s.`);
+  } else {
+    console.log(`>>> ALLOWED at D=${afterS}s — the first mint has aged out. W < ${afterS}s.`);
+  }
+  return { afterS, filled: at.length, refused };
+}
+
+/** Between trials: serve any penalty, then let the window drain completely, so
+ *  the next trial starts from an empty counter rather than the last one's tail. */
+async function settle(refused: boolean, hiS: number): Promise<void> {
+  const s = SETTLE_S > 0 ? SETTLE_S : (refused ? 330 : 0) + hiS + 30;
+  console.log(`\nsettling ${s}s before the next trial (penalty + a full window)...`);
+  await sleep(s * 1_000);
+}
+
+async function armWindow(): Promise<Probe | null> {
+  console.log('\n=== arm 6 — how wide is the counting window? ===');
+  console.log('Probed from below, so no measurement is taken while a penalty is running.\n');
+
+  if (!SEARCH) {
+    await windowTrial(AFTER_S, QUOTA_HINT);
+    console.log('\nRun again with a different --after to bracket it, or use --search.');
+    return null;
+  }
+
+  let lo = LO_S;
+  let hi = HI_S;
+  console.log(`binary search for W in [${lo}, ${hi}]s, stopping within ${TOL_S}s.\n`);
+  while (hi - lo > TOL_S) {
+    const mid = Math.round((lo + hi) / 2);
+    const t = await windowTrial(mid, QUOTA_HINT);
+    if (t.refused === null) {
+      console.log('\n>>> trial inconclusive; stopping rather than searching on bad data.');
+      return null;
+    }
+    if (t.refused) lo = mid;
+    else hi = mid;
+    console.log(`\n>>> W is now bracketed to [${lo}, ${hi}]s.`);
+    if (hi - lo > TOL_S) await settle(t.refused, hi);
+  }
+  console.log(`\n>>> W is between ${lo}s and ${hi}s.`);
+  console.log(`    A limiter whose window is >= ${hi}s can never be surprised by this one.`);
+  return null;
+}
+
+/**
  * Only worth running once something has already said no.
  *
  * The question it settles is not academic. If a block reaches only the login
@@ -778,6 +900,10 @@ function printPlan(): void {
   console.log(`  target   : ${TARGET}  (--arm=hammer only; one of ${Object.keys(TARGETS).join(', ')})`);
   console.log(`  accel    : ${ACCEL}${ACCEL < 1 ? ` — tighten the gap every ${STEP} survivals` : ' (no staircase)'}`);
   console.log(`  burst    : ${BURST}${BURST > 1 ? ' fired concurrently per round' : ' (sequential)'}`);
+  console.log(
+    `  window   : --arm=window fills ${QUOTA_HINT} then probes ` +
+      (SEARCH ? `by binary search over [${LO_S}, ${HI_S}]s to within ${TOL_S}s` : `once at D=${AFTER_S}s`),
+  );
   console.log(`  max      : ${MAX} rounds`);
   console.log(`  gap      : ${GAP_MS}ms between rounds`);
   console.log(`  recheck  : every ${RECHECK_S}s, for up to ${Math.round(WAIT_S / 60)}min, once blocked`);
@@ -791,15 +917,21 @@ async function main(): Promise<void> {
     printPlan();
     return;
   }
-  if (ARM !== 'issue' && ARM !== 'poll' && ARM !== 'hammer') {
-    console.error(`unknown --arm=${ARM} (expected "issue", "poll" or "hammer")`);
+  if (ARM !== 'issue' && ARM !== 'poll' && ARM !== 'hammer' && ARM !== 'window') {
+    console.error(`unknown --arm=${ARM} (expected "issue", "poll", "hammer" or "window")`);
     process.exitCode = 2;
     return;
   }
 
   console.log(`rateProbe starting — arm=${ARM}, max=${MAX}, gap=${GAP_MS}ms, accel=${ACCEL}`);
   const blocked =
-    ARM === 'issue' ? await armIssue() : ARM === 'poll' ? await armPoll() : await armHammer();
+    ARM === 'issue'
+      ? await armIssue()
+      : ARM === 'poll'
+        ? await armPoll()
+        : ARM === 'window'
+          ? await armWindow()
+          : await armHammer();
 
   if (blocked) {
     reportSignature(blocked);

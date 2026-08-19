@@ -72,8 +72,8 @@ export class SlidingWindow {
   private hits: number[] = [];
 
   constructor(
-    private readonly limit: number,
-    private readonly windowMs: number,
+    readonly limit: number,
+    readonly windowMs: number,
     private readonly now: Now = Date.now,
   ) {}
 
@@ -129,6 +129,23 @@ export class RateGate {
   /** How many callers are queued right now, including the one being served. */
   get queued(): number {
     return this.waiting;
+  }
+
+  /**
+   * Roughly how long a caller joining right now would wait.
+   *
+   * Advisory only, and deliberately so: the exact answer depends on when each
+   * slot ages out, which nobody needs to the second. Steady-state throughput is
+   * `limit` per window, so `ahead` waiters take `ahead * window / limit` to
+   * clear, on top of the wait for the first slot. It exists so a caller can
+   * decide whether the wait is worth telling a human about BEFORE joining the
+   * queue — after joining it is too late, since a caller deep in the queue does
+   * not get its turn (and so learns nothing) until everyone ahead is served.
+   */
+  projectedWaitMs(): number {
+    const first = this.window.remaining();
+    if (first === 0) return 0;
+    return first + (this.waiting * this.window.windowMs) / this.window.limit;
   }
 
   /**

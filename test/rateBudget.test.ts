@@ -17,15 +17,18 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
+import type { BaseMessageOptions, Message } from 'discord.js';
+
 import type { BeanfunClient } from '../src/beanfun/client.js';
 import { BeanfunError } from '../src/beanfun/errors.js';
 import {
   getSessionKey,
   QR_BUDGET_LIMIT,
   QR_BUDGET_WINDOW_MS,
+  QR_QUEUE_MAX_WAIT_MS,
 } from '../src/beanfun/login/sessionKey.js';
 import { RateGate, SlidingWindow } from '../src/core/guard.js';
-import { loginFailureMessage } from '../src/discord/flow.js';
+import { deliverQr, loginFailureMessage, queueNotice } from '../src/discord/flow.js';
 
 /** The widest counting window the measurement allows beanfun to have. */
 const MEASURED_W_MS = 83_600;
@@ -208,6 +211,86 @@ describe('RateGate — one queue, shared by everyone', () => {
     await gate.acquire();
     expect((await gate.acquire()).ok).toBe(false);
     expect((await gate.acquire()).ok).toBe(false);
+  });
+});
+
+describe('the queue notice', () => {
+  it('says nothing for a wait shorter than the reading of it', () => {
+    expect(queueNotice(2_000, 0)).toBeNull();
+  });
+
+  it('warns, with the wait and the depth, once the wait is worth noticing', () => {
+    const msg = queueNotice(45_000, 3);
+    expect(msg?.content).toContain('45 秒');
+    expect(msg?.content).toContain('3 個人');
+  });
+
+  it('tells the user that retrying costs them a slot', () => {
+    // Silence is what makes someone run /login again, and a second run does not
+    // join the first — it mints another pSKey out of the same budget they are
+    // queued for. This sentence is the reason the notice exists at all.
+    expect(queueNotice(45_000, 0)?.content).toContain('只會多佔一個名額');
+  });
+
+  it('stays quiet when the wait is so long the request will be refused instead', () => {
+    // The refusal carries its own message; two in a row would just be noise.
+    expect(queueNotice(QR_QUEUE_MAX_WAIT_MS, 9)).toBeNull();
+  });
+});
+
+describe('where the QR is delivered', () => {
+  type Send = (payload: BaseMessageOptions) => Promise<Message>;
+  const spies = (): { deliver: Send; dmSend: Send; used: string[] } => {
+    const used: string[] = [];
+    return {
+      used,
+      deliver: (() => {
+        used.push('deliver');
+        return Promise.resolve({} as Message);
+      }) as Send,
+      dmSend: (() => {
+        used.push('dmSend');
+        return Promise.resolve({} as Message);
+      }) as Send,
+    };
+  };
+
+  it('replaces the command reply when there was no wait', async () => {
+    const s = spies();
+    await deliverQr({ content: 'qr' }, false, s.deliver, s.dmSend);
+    expect(s.used).toEqual(['deliver']);
+  });
+
+  it('sends a NEW message after a wait, so the user is notified', async () => {
+    // The whole point. An edit of the queue notice fires no notification, and
+    // someone who waited a minute has stopped looking — they would be handed a
+    // QR they never see, which then expires in 150s.
+    const s = spies();
+    await deliverQr({ content: 'qr' }, true, s.deliver, s.dmSend);
+    expect(s.used).toEqual(['dmSend']);
+  });
+});
+
+describe('RateGate.projectedWaitMs', () => {
+  it('is zero while the window still has room', () => {
+    const gate = gateOf(4, 90_000, 600_000);
+    expect(gate.projectedWaitMs()).toBe(0);
+  });
+
+  it('grows with the number of callers already waiting', async () => {
+    // Whatever a caller is told has to account for the queue ahead of them, not
+    // just the next free slot — otherwise the estimate is wrong by exactly the
+    // amount that matters when it matters.
+    const c = fakeClock();
+    const gate = new RateGate(new SlidingWindow(2, 60_000, c.now), 600_000, c.now, c.sleep);
+    await gate.acquire();
+    await gate.acquire();
+    const alone = gate.projectedWaitMs();
+    expect(alone).toBe(60_000);
+
+    const held = [gate.acquire(), gate.acquire()];
+    expect(gate.projectedWaitMs()).toBeGreaterThan(alone);
+    await Promise.all(held);
   });
 });
 

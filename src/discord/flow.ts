@@ -30,7 +30,7 @@ import { listGames } from '../beanfun/games.js';
 import { finalizeQrLogin } from '../beanfun/login/qrFinalize.js';
 import { initQrLogin } from '../beanfun/login/qrInit.js';
 import { pollQrLogin } from '../beanfun/login/qrPoll.js';
-import { getSessionKey } from '../beanfun/login/sessionKey.js';
+import { getSessionKey, projectedQrWait, QR_QUEUE_MAX_WAIT_MS } from '../beanfun/login/sessionKey.js';
 import { getOtp } from '../beanfun/otp.js';
 import type { QrLoginInit, ServiceAccount } from '../beanfun/types.js';
 import { Cooldown } from '../core/guard.js';
@@ -194,6 +194,48 @@ export function loginFailureMessage(e: unknown): BaseMessageOptions {
   return { content: `❌ 啟動登入失敗:${errText(e)}`, components: [reloginRow()] };
 }
 
+/** Below this, saying "please wait" costs more attention than the wait does. */
+const QUEUE_NOTICE_MIN_MS = 3_000;
+
+/**
+ * Whether a queued login is worth telling the user about, and what to say.
+ *
+ * Pure so the decision is testable; `sendFreshQr` only has to deliver it.
+ *
+ * The last line is the load-bearing one. Waiting silently is what makes a user
+ * run `/login` again, and a second run does not join the first — `withLock`
+ * serialises it, `beginLogin` still finds them logged out, and it mints a
+ * second pSKey. The silence costs a slot from the very budget it is waiting on.
+ */
+export function queueNotice(waitMs: number, ahead: number): BaseMessageOptions | null {
+  if (waitMs < QUEUE_NOTICE_MIN_MS || waitMs >= QR_QUEUE_MAX_WAIT_MS) return null;
+  return {
+    content:
+      '⏳ **排隊中**\n' +
+      (ahead > 0 ? `前面還有 ${ahead} 個人,` : '') +
+      `大約 **${waitText(waitMs)}後**會把 QR 傳給你,請稍等一下。\n\n` +
+      '-# Beanfun 限制了這台機器產生 QR 的頻率。再下一次指令不會比較快,只會多佔一個名額。',
+  };
+}
+
+/**
+ * Send the QR where the user will actually see it arrive.
+ *
+ * After a queued wait it must be a NEW message. Editing the notice in place
+ * fires no notification, and someone who has waited a minute is not looking at
+ * the channel any more — they would be handed a QR they never learn about, and
+ * it expires in 150s. `deliver` has also already been spent on the notice in
+ * that case, since for a slash command it *is* the interaction reply.
+ */
+export function deliverQr(
+  payload: BaseMessageOptions,
+  queued: boolean,
+  deliver: Deliver,
+  dmSend: Deliver,
+): Promise<Message> {
+  return queued ? dmSend(payload) : deliver(payload);
+}
+
 /** Reset the client and drive a fresh QR challenge. The QR message goes through
  *  `deliver`; subsequent poll edits + the game menu use `dm`. Caller holds the
  *  lock. */
@@ -205,15 +247,18 @@ async function sendFreshQr(
 ): Promise<void> {
   const state = manager.resetClient(userId);
   try {
-    // May queue: beanfun rations pSKeys per IP and we share one, so a busy
-    // moment is a wait rather than a failure. `makeReplyDeliver` defers the
-    // interaction at 2.6s, so the user sees Discord's own pending state and the
-    // QR still lands on the same message.
+    // beanfun rations pSKeys per IP and we share one, so a busy moment is a
+    // wait rather than a failure. Warn BEFORE joining the queue: once in it, the
+    // caller learns nothing until its turn arrives, which is the whole wait.
+    const { waitMs, ahead } = projectedQrWait();
+    const queued = queueNotice(waitMs, ahead);
+    if (queued) await deliver(queued);
+
     const skey = await getSessionKey(state.client);
     const init = await initQrLogin(state.client, skey);
     state.pendingInit = init;
 
-    const msg = await deliver(buildQrPayload(init));
+    const msg = await deliverQr(buildQrPayload(init), queued !== null, deliver, (p) => dm.send(p));
     await setActive(userId, msg, 'menu'); // retires any prior menu/OTP
     startQrPolling(manager, userId, dm, msg);
   } catch (e) {

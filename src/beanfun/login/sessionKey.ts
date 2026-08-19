@@ -49,6 +49,12 @@ const qrGate = new RateGate(
   QR_QUEUE_MAX_WAIT_MS,
 );
 
+/** Roughly how long the next `getSessionKey` would spend queued, and how many
+ *  callers are already waiting — for deciding whether to warn a human first. */
+export function projectedQrWait(): { waitMs: number; ahead: number } {
+  return { waitMs: qrGate.projectedWaitMs(), ahead: qrGate.queued };
+}
+
 export async function getSessionKey(client: BeanfunClient): Promise<string> {
   const turn = await qrGate.acquire();
   if (!turn.ok) {

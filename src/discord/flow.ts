@@ -77,19 +77,25 @@ type OtpWriter = (payload: BaseMessageOptions) => Promise<Message>;
 /** Defer ~400ms before Discord's 3s ack deadline only if the first message
  *  isn't ready yet, so a slow QR build can't kill the interaction. The fast
  *  path replies directly — no "思考中". */
-function makeReplyDeliver(interaction: ChatInputCommandInteraction): Deliver {
+export function makeReplyDeliver(interaction: ChatInputCommandInteraction): Deliver {
   let deferring: Promise<unknown> | null = null;
+  let spent = false;
   const timer = setTimeout(() => {
     deferring = interaction.deferReply();
   }, 2600);
   return async (payload) => {
     clearTimeout(timer);
-    if (deferring) {
-      await deferring;
-      await interaction.editReply(payload);
-    } else {
-      await interaction.reply(payload);
-    }
+    if (deferring) await deferring;
+    // An interaction has exactly one reply slot. A queued login spends it on the
+    // "please wait" notice, so everything after that — including the message
+    // explaining why the login then failed — has to be a follow-up. Replying
+    // twice throws "already sent or deferred", and that throw REPLACES the error
+    // being reported with an opaque internal-error notice, which is how a real
+    // failure in `initQrLogin` reached production with no trace of what it was.
+    if (spent) return interaction.followUp(payload);
+    spent = true;
+    if (deferring) await interaction.editReply(payload);
+    else await interaction.reply(payload);
     return interaction.fetchReply();
   };
 }
@@ -282,8 +288,19 @@ async function sendFreshQr(
     qrMessageByUser.set(userId, msg);
     startQrPolling(manager, userId, dm);
   } catch (e) {
-    const m = await deliver(loginFailureMessage(e));
-    await setActive(userId, m, 'menu');
+    // Log before reporting. Reporting can itself fail — the reply slot may be
+    // spent, the DM may be closed — and an error that exists only in a message
+    // nobody managed to send is an error nobody can debug.
+    console.error(`[login] could not deliver a QR to ${userId}:`, errText(e));
+    try {
+      const m = await deliver(loginFailureMessage(e));
+      await setActive(userId, m, 'menu');
+    } catch (reportErr) {
+      console.error('[login] and could not say so either:', errText(reportErr));
+    }
+    // Outside the inner try on purpose: a half-reset state that never gets
+    // cleaned up is what made the NEXT /login mint a second pSKey instead of
+    // reusing the challenge.
     manager.remove(userId);
   }
 }

@@ -31,7 +31,7 @@ vi.mock('../src/beanfun/login/sessionKey.js', () => ({
 
 import type { QrLoginInit } from '../src/beanfun/types.js';
 import { SessionManager } from '../src/core/sessionManager.js';
-import { beginLogin, handleLogin } from '../src/discord/flow.js';
+import { beginLogin, handleLogin, makeReplyDeliver } from '../src/discord/flow.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -89,5 +89,60 @@ describe('a second /login while the first is still working', () => {
     // ...and the user gets the same challenge back, not a newly minted one.
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.files).toHaveLength(1);
+  });
+});
+
+/**
+ * The interaction's single reply slot.
+ *
+ * A queued login spends it on the "please wait" notice, so the message that
+ * follows — very often the one explaining why the login then FAILED — must be a
+ * follow-up. Shipping it as a second `reply()` throws "already sent or
+ * deferred", and because that throw happens inside the error handler it
+ * replaces the real error with an opaque internal-error notice. Seen in
+ * production 2026-08-19: `initQrLogin` failed after a 52.5s queue and the only
+ * trace left anywhere was the reply-slot complaint.
+ */
+describe('makeReplyDeliver', () => {
+  const fake = (): { interaction: ChatInputCommandInteraction; calls: string[] } => {
+    const calls: string[] = [];
+    const interaction = {
+      reply: () => {
+        calls.push('reply');
+        return Promise.resolve(message('r'));
+      },
+      editReply: () => {
+        calls.push('editReply');
+        return Promise.resolve(message('r'));
+      },
+      followUp: () => {
+        calls.push('followUp');
+        return Promise.resolve(message('f'));
+      },
+      deferReply: () => {
+        calls.push('deferReply');
+        return Promise.resolve(message('r'));
+      },
+      fetchReply: () => Promise.resolve(message('r')),
+    } as unknown as ChatInputCommandInteraction;
+    return { interaction, calls };
+  };
+
+  it('replies once, then follows up — never replies twice', async () => {
+    const f = fake();
+    const deliver = makeReplyDeliver(f.interaction);
+    await deliver({ content: 'queued' });
+    await deliver({ content: 'and here is why it failed' });
+    expect(f.calls).toEqual(['reply', 'followUp']);
+  });
+
+  it('edits the deferral first, then follows up', async () => {
+    vi.useFakeTimers();
+    const f = fake();
+    const deliver = makeReplyDeliver(f.interaction);
+    await vi.advanceTimersByTimeAsync(3_000); // the 2.6s deferral fires
+    await deliver({ content: 'queued' });
+    await deliver({ content: 'and here is why it failed' });
+    expect(f.calls).toEqual(['deferReply', 'editReply', 'followUp']);
   });
 });

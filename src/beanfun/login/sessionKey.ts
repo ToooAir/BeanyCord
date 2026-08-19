@@ -66,7 +66,8 @@ export async function getSessionKey(client: BeanfunClient): Promise<string> {
   }
   if (turn.waitedMs > 0) {
     console.log(
-      `[login] queued ${(turn.waitedMs / 1_000).toFixed(1)}s for a pSKey slot; ${qrGate.queued - 1} still waiting`,
+      // `queued` already excludes us: acquire() decrements before it resolves.
+      `[login] queued ${(turn.waitedMs / 1_000).toFixed(1)}s for a pSKey slot; ${qrGate.queued} still waiting`,
     );
   }
 

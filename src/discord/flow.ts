@@ -50,6 +50,8 @@ const OTP_COOLDOWN_MS = 10_000;
 
 const otpCooldown = new Cooldown(OTP_COOLDOWN_MS);
 
+const waitText = (ms: number): string => `${Math.max(1, Math.ceil(ms / 1_000))} 秒`;
+
 const errText = safeError;
 
 /** A one-button row that restarts a fresh QR login (M3 recovery affordance). */
@@ -172,6 +174,15 @@ export async function beginLogin(
  * worst thing a user can do. Say how long to wait instead.
  */
 export function loginFailureMessage(e: unknown): BaseMessageOptions {
+  if (e instanceof BeanfunError && e.code === 'login.rate_budget') {
+    return {
+      content:
+        '⏳ **現在登入的人太多**\n' +
+        'Beanfun 限制了這台機器產生 QR 的頻率,而排隊已經超過可以等的長度。\n' +
+        `請 **${waitText(e.retryAfterMs ?? 0)}後**再試一次。\n\n` +
+        '-# 這個額度是所有使用者共用的 — 先等一下比現在重試更快。',
+    };
+  }
   if (e instanceof BeanfunError && e.code === 'http.ip_blocked') {
     return {
       content:
@@ -194,6 +205,10 @@ async function sendFreshQr(
 ): Promise<void> {
   const state = manager.resetClient(userId);
   try {
+    // May queue: beanfun rations pSKeys per IP and we share one, so a busy
+    // moment is a wait rather than a failure. `makeReplyDeliver` defers the
+    // interaction at 2.6s, so the user sees Discord's own pending state and the
+    // QR still lands on the same message.
     const skey = await getSessionKey(state.client);
     const init = await initQrLogin(state.client, skey);
     state.pendingInit = init;

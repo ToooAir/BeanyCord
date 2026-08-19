@@ -11,6 +11,11 @@ export class BeanfunError extends Error {
   constructor(
     public readonly code: string,
     message?: string,
+    /** For refusals that will lift on their own: how long until a retry is
+     *  worth making. The Discord layer turns this into a concrete instruction,
+     *  which is the difference between "try again later" and "try again in 12
+     *  seconds" — only one of those stops a user from immediately retrying. */
+    public readonly retryAfterMs?: number,
   ) {
     super(message ?? code);
     this.name = 'BeanfunError';

@@ -60,6 +60,114 @@ export class FailureLockout {
   }
 }
 
+/**
+ * At most `limit` uses in any `windowMs` span.
+ *
+ * Distinct from `Cooldown`, which spaces uses evenly: a server quota lets you
+ * spend a burst and then stops, and pacing evenly would both waste the burst and
+ * fail to model the ceiling. Beanfun's pSKey quota is exactly this shape, so
+ * this is the shape that can be proved safe against it.
+ */
+export class SlidingWindow {
+  private hits: number[] = [];
+
+  constructor(
+    private readonly limit: number,
+    private readonly windowMs: number,
+    private readonly now: Now = Date.now,
+  ) {}
+
+  /** Milliseconds until another `take()` would succeed (0 = room right now). */
+  remaining(): number {
+    const t = this.now();
+    const cutoff = t - this.windowMs;
+    while (this.hits.length > 0 && this.hits[0]! <= cutoff) this.hits.shift();
+    if (this.hits.length < this.limit) return 0;
+    // hits[0] is the oldest still counted; room appears the moment it ages out.
+    return Math.max(0, this.hits[0]! + this.windowMs - t);
+  }
+
+  /** Record a use if there is room. Returns false if there is not. */
+  take(): boolean {
+    if (this.remaining() > 0) return false;
+    this.hits.push(this.now());
+    return true;
+  }
+}
+
+/** Outcome of asking a `RateGate` for a turn. */
+export type GateResult = { ok: true; waitedMs: number } | { ok: false; retryAfterMs: number };
+
+const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A single queue in front of a `SlidingWindow`, shared by everyone.
+ *
+ * The constraint being modelled is per-IP, and a deployment has one IP — the
+ * server has no idea which user a request belongs to. So throttling per user
+ * models nothing: it refuses someone the budget could have served, while the
+ * budget itself is what actually keeps us safe. Fairness here comes from FIFO
+ * order instead, and nobody is turned away for someone else's traffic.
+ *
+ * Callers wait rather than fail, because a wait is almost always shorter than
+ * the five-minute penalty for getting this wrong, and because a refusal invites
+ * an immediate retry. `maxWaitMs` bounds that: past it the honest answer is a
+ * refusal with an ETA, not a wait long enough for the caller's own deadline
+ * (a Discord interaction token) to expire first.
+ */
+export class RateGate {
+  private chain: Promise<unknown> = Promise.resolve();
+  private waiting = 0;
+
+  constructor(
+    private readonly window: SlidingWindow,
+    private readonly maxWaitMs: number,
+    private readonly now: Now = Date.now,
+    private readonly sleep: (ms: number) => Promise<void> = realSleep,
+  ) {}
+
+  /** How many callers are queued right now, including the one being served. */
+  get queued(): number {
+    return this.waiting;
+  }
+
+  /**
+   * Take a turn, waiting for one if necessary. Resolves in call order.
+   *
+   * The deadline is fixed when the caller joins, not when its turn arrives, so
+   * a long queue refuses the people at the back rather than silently holding
+   * them past the point where an answer is still useful.
+   */
+  async acquire(): Promise<GateResult> {
+    const deadline = this.now() + this.maxWaitMs;
+    this.waiting += 1;
+
+    const mine = this.chain.then(async (): Promise<GateResult> => {
+      const startedAt = this.now();
+      const wait = this.window.remaining();
+      if (startedAt + wait > deadline) {
+        return { ok: false, retryAfterMs: wait };
+      }
+      if (wait > 0) await this.sleep(wait);
+      this.window.take();
+      return { ok: true, waitedMs: this.now() - startedAt };
+    });
+
+    // The queue must survive one caller's failure, so the chain never carries a
+    // rejection forward.
+    this.chain = mine.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    try {
+      return await mine;
+    } finally {
+      this.waiting -= 1;
+    }
+  }
+}
+
 export class Cooldown {
   private readonly lastAt = new Map<string, number>();
 

@@ -218,11 +218,15 @@ export function loginFailureMessage(e: unknown): BaseMessageOptions {
     };
   }
   if (e instanceof BeanfunError && e.code === 'http.ip_blocked') {
+    // Prefer the measured remainder over the nominal five minutes: once the
+    // block has been seen, the gate knows how much of the penalty is left, and
+    // "3 分鐘" beats "about 5 minutes" for someone deciding whether to wait.
+    const left = e.retryAfterMs ? `**${waitText(e.retryAfterMs)}後**` : '**約 5 分鐘後**';
     return {
       content:
         '🚦 **Beanfun 暫時擋下了登入請求**\n' +
-        '短時間內產生的 QR 太多,Beanfun 鎖住了這台機器的連線。**約 5 分鐘後**再試一次即可。\n\n' +
-        '-# 這個額度是所有使用者共用的,所以現在重試只會讓等待更久 — 請直接等 5 分鐘。',
+        `短時間內產生的 QR 太多,Beanfun 鎖住了這台機器的連線。${left}再試一次即可。\n\n` +
+        '-# 這個額度是所有使用者共用的,所以現在重試只會讓等待更久 — 請直接等。',
     };
   }
   return { content: `❌ 啟動登入失敗:${errText(e)}`, components: [reloginRow()] };

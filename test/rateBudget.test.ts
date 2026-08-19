@@ -30,9 +30,22 @@ import {
 import { RateGate, SlidingWindow } from '../src/core/guard.js';
 import { deliverQr, loginFailureMessage, queueNotice } from '../src/discord/flow.js';
 
-/** The widest counting window the measurement allows beanfun to have. */
+/** The widest counting window the home measurement allows beanfun to have. */
 const MEASURED_W_MS = 83_600;
 const SERVER_QUOTA = 4;
+
+/**
+ * ...and what production then showed the home numbers do not cover.
+ *
+ * 2026-08-19 a mint the model called safe was refused: four inside 35s, the
+ * fifth sent at t1+90s with the earlier ones 55/67/79/90s old. Either the oldest
+ * had aged out and three were enough to refuse us — a quota of 3 — or the window
+ * reaches past 90s. The refusal cannot tell those apart, so what ships has to
+ * survive both, and the tests assert both rather than the one that was measured
+ * somewhere else.
+ */
+const HOSTILE_QUOTA = 3;
+const HOSTILE_W_MS = 90_000;
 
 /** What we ship — imported, not restated, so changing it re-runs the proof. */
 const OUR_LIMIT = QR_BUDGET_LIMIT;
@@ -84,10 +97,10 @@ describe('SlidingWindow', () => {
 
 /** Replays a schedule against beanfun's measured behaviour and returns the time
  *  of the first request it would have refused, or null if it refuses none. */
-function firstRefusal(schedule: number[], windowMs: number): number | null {
+function firstRefusal(schedule: number[], windowMs: number, quota = SERVER_QUOTA): number | null {
   const served: number[] = [];
   for (const t of schedule) {
-    if (served.filter((s) => t - s < windowMs).length >= SERVER_QUOTA) return t;
+    if (served.filter((s) => t - s < windowMs).length >= quota) return t;
     served.push(t);
   }
   return null;
@@ -130,6 +143,14 @@ describe('the shipped budget, against the server we measured', () => {
       if (turn.ok) emitted.push(c.now());
     }
     expect(firstRefusal(emitted, MEASURED_W_MS)).toBeNull();
+  });
+
+  it('holds against a quota of 3, the harsher reading of the production refusal', () => {
+    expect(firstRefusal(drive(OUR_LIMIT, OUR_WINDOW_MS), MEASURED_W_MS, HOSTILE_QUOTA)).toBeNull();
+  });
+
+  it('holds against a window reaching past 90s, the other reading', () => {
+    expect(firstRefusal(drive(OUR_LIMIT, OUR_WINDOW_MS), HOSTILE_W_MS, HOSTILE_QUOTA)).toBeNull();
   });
 
   it('and the property is not vacuous: a window narrower than beanfun fails it', () => {
@@ -201,7 +222,36 @@ describe('RateGate — one queue, shared by everyone', () => {
     // all. A refusal carrying an ETA is strictly better than a silent expiry.
     const gate = gateOf(1, 90_000, 10_000);
     expect(await gate.acquire()).toEqual({ ok: true, waitedMs: 0 });
-    expect(await gate.acquire()).toEqual({ ok: false, retryAfterMs: 90_000 });
+    expect(await gate.acquire()).toEqual({ ok: false, retryAfterMs: 90_000, reason: 'busy' });
+  });
+
+  it('holds everyone off for the penalty once the server has refused us', async () => {
+    // A window alone cannot describe beanfun. A refusal costs a fixed 4-5
+    // minutes, and our window is only a model of the server's counter — it
+    // resets when the process does, the server's does not. Production queued
+    // 54.9s under a perfectly healthy-looking window and was rate-limited on
+    // arrival anyway.
+    const gate = gateOf(4, 90_000, 600_000);
+    expect((await gate.acquire()).ok).toBe(true);
+    gate.penalise(5 * 60_000);
+    const turn = await gate.acquire();
+    expect(turn).toMatchObject({ ok: true, waitedMs: 5 * 60_000 });
+  });
+
+  it('calls a penalty what it is, so the caller can say so', async () => {
+    const gate = gateOf(4, 90_000, 10_000);
+    gate.penalise(5 * 60_000);
+    expect(await gate.acquire()).toMatchObject({ ok: false, reason: 'blocked' });
+  });
+
+  it('never lets a later report shorten a penalty already running', () => {
+    // Blocked requests were measured not to extend the penalty, so reports can
+    // arrive late and out of order. Taking the max means a stale one cannot
+    // release everybody early into a wall that is still standing.
+    const gate = gateOf(4, 90_000, 600_000);
+    gate.penalise(5 * 60_000);
+    gate.penalise(1_000);
+    expect(gate.projectedWaitMs()).toBeGreaterThan(4 * 60_000);
   });
 
   it('keeps the queue moving after a caller is refused', async () => {

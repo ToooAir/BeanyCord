@@ -95,8 +95,16 @@ export class SlidingWindow {
   }
 }
 
-/** Outcome of asking a `RateGate` for a turn. */
-export type GateResult = { ok: true; waitedMs: number } | { ok: false; retryAfterMs: number };
+/**
+ * Outcome of asking a `RateGate` for a turn.
+ *
+ * `busy` means our own budget is full; `blocked` means the server has already
+ * refused us and is serving a penalty. They need separate answers: one is a
+ * queue we manage, the other is a wall we can only wait out.
+ */
+export type GateResult =
+  | { ok: true; waitedMs: number }
+  | { ok: false; retryAfterMs: number; reason: 'busy' | 'blocked' };
 
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -118,6 +126,11 @@ const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r
 export class RateGate {
   private chain: Promise<unknown> = Promise.resolve();
   private waiting = 0;
+  private penaltyUntil = 0;
+  /** Take times kept purely to explain a refusal, well past `windowMs` — the
+   *  window itself prunes, and what we need at that moment is the history the
+   *  window has already forgotten. */
+  private recent: number[] = [];
 
   constructor(
     private readonly window: SlidingWindow,
@@ -132,6 +145,54 @@ export class RateGate {
   }
 
   /**
+   * Record that the server has refused us, and hold everyone off for `ms`.
+   *
+   * A window alone cannot describe beanfun: measured three times, a refusal
+   * costs a FIXED 4-5 minutes during which no amount of window arithmetic helps,
+   * and our own window is only ever an estimate of the server's — it resets when
+   * the process does, while the server's counter does not. Without this, a
+   * deployment that gets blocked keeps releasing callers on schedule, each of
+   * them waiting out a queue only to be refused on arrival. Which is exactly
+   * what production did: queued 54.9s, then rate-limited anyway.
+   *
+   * Blocked requests were measured NOT to extend the penalty, so the deadline is
+   * a max, never a sliding one — a late report cannot strand anybody.
+   */
+  penalise(ms: number): void {
+    this.penaltyUntil = Math.max(this.penaltyUntil, this.now() + ms);
+  }
+
+  /**
+   * Our own recent footprint, for the log line next to a refusal.
+   *
+   * Being refused while our model says we are well inside the budget means the
+   * model is wrong, and there is no way to tell WHICH way from the refusal
+   * alone: the quota may be lower on this address than where it was measured,
+   * the window may be a different shape, or the address may be shared with
+   * somebody else spending it. All three look identical unless our own history
+   * is printed beside the refusal, so print it.
+   */
+  footprint(): string {
+    const t = this.now();
+    const spans = [30, 60, 90, 120, 300, 600];
+    const counts = spans.map((s) => this.recent.filter((h) => t - h <= s * 1_000).length);
+    const newest = this.recent.length > 0 ? (t - this.recent[this.recent.length - 1]!) / 1_000 : null;
+    const oldest = this.recent.length > 0 ? (t - this.recent[0]!) / 1_000 : null;
+    return (
+      `ours in last ${spans.map((s) => `${s}s`).join('/')}: ${counts.join('/')}` +
+      (newest === null ? ' (none recorded)' : `; newest ${newest.toFixed(1)}s ago, oldest ${oldest!.toFixed(1)}s ago`)
+    );
+  }
+
+  /** How long until a turn could be taken: our own budget or the server's
+   *  penalty, whichever is further out. */
+  private waitNow(): { ms: number; reason: 'busy' | 'blocked' } {
+    const penalty = Math.max(0, this.penaltyUntil - this.now());
+    const budget = this.window.remaining();
+    return penalty > budget ? { ms: penalty, reason: 'blocked' } : { ms: budget, reason: 'busy' };
+  }
+
+  /**
    * Roughly how long a caller joining right now would wait.
    *
    * Advisory only, and deliberately so: the exact answer depends on when each
@@ -143,7 +204,7 @@ export class RateGate {
    * not get its turn (and so learns nothing) until everyone ahead is served.
    */
   projectedWaitMs(): number {
-    const first = this.window.remaining();
+    const first = this.waitNow().ms;
     if (first === 0) return 0;
     return first + (this.waiting * this.window.windowMs) / this.window.limit;
   }
@@ -161,12 +222,14 @@ export class RateGate {
 
     const mine = this.chain.then(async (): Promise<GateResult> => {
       const startedAt = this.now();
-      const wait = this.window.remaining();
+      const { ms: wait, reason } = this.waitNow();
       if (startedAt + wait > deadline) {
-        return { ok: false, retryAfterMs: wait };
+        return { ok: false, retryAfterMs: wait, reason };
       }
       if (wait > 0) await this.sleep(wait);
       this.window.take();
+      this.recent.push(this.now());
+      if (this.recent.length > 40) this.recent.shift();
       return { ok: true, waitedMs: this.now() - startedAt };
     });
 

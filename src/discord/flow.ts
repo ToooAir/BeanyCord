@@ -131,9 +131,15 @@ export async function handleLogin(
 
   // In a 1:1 DM, deliver the first message AS the /login reply so the QR / menu
   // replaces the command (no "思考中" — see makeReplyDeliver).
-  await manager.withLock(userId, () =>
-    beginLogin(manager, userId, dm, makeReplyDeliver(interaction)),
-  );
+  //
+  // Built BEFORE taking the lock, and that ordering is the whole point: it arms
+  // the 2.6s deferral, and Discord kills an interaction that is not acknowledged
+  // within three seconds. Constructing it inside the callback armed nothing
+  // until the lock was free, so a second /login during a login that was still
+  // running — three round trips, or a queued wait — died with "the application
+  // did not respond".
+  const deliver = makeReplyDeliver(interaction);
+  await manager.withLock(userId, () => beginLogin(manager, userId, dm, deliver));
 }
 
 /** Logged-in → game menu (recovering if the resumed session is dead); else a
@@ -161,6 +167,19 @@ export async function beginLogin(
     }
     return;
   }
+  // A second `/login` while a challenge is still in flight. Minting another one
+  // would call `resetClient`, which replaces the cookie jar the pending QR
+  // belongs to — silently killing the QR the user is looking at — and would
+  // spend another pSKey from a budget shared with everyone else. Re-send the one
+  // that still works instead, and point the poll loop at the new message.
+  const pending = manager.get(userId)?.pendingInit;
+  if (pending) {
+    const m = await deliver(buildQrPayload(pending));
+    await setActive(userId, m, 'menu');
+    qrMessageByUser.set(userId, m);
+    return;
+  }
+
   await sendFreshQr(manager, userId, dm, deliver);
 }
 
@@ -260,7 +279,8 @@ async function sendFreshQr(
 
     const msg = await deliverQr(buildQrPayload(init), queued !== null, deliver, (p) => dm.send(p));
     await setActive(userId, msg, 'menu'); // retires any prior menu/OTP
-    startQrPolling(manager, userId, dm, msg);
+    qrMessageByUser.set(userId, msg);
+    startQrPolling(manager, userId, dm);
   } catch (e) {
     const m = await deliver(loginFailureMessage(e));
     await setActive(userId, m, 'menu');
@@ -331,13 +351,23 @@ function buildQrPayload(init: QrLoginInit): BaseMessageOptions {
   };
 }
 
-function startQrPolling(
-  manager: SessionManager,
-  userId: string,
-  dm: DMChannel,
-  qrMessage: Message,
-): void {
+/**
+ * The QR message the poll loop keeps up to date.
+ *
+ * Held per user rather than captured by the loop, because a repeat `/login`
+ * re-sends the same challenge as a new message (see `beginLogin`) and the loop
+ * has to follow it. A loop still editing the message it started with would be
+ * writing "QR expired" into something already deleted, leaving the user staring
+ * at a live-looking QR that nothing will ever update.
+ */
+const qrMessageByUser = new Map<string, Message>();
+
+function startQrPolling(manager: SessionManager, userId: string, dm: DMChannel): void {
   const deadline = Date.now() + QR_TTL_MS;
+  const editQr = async (content: string, rows: ActionRowBuilder<ButtonBuilder>[] = []): Promise<void> => {
+    const m = qrMessageByUser.get(userId);
+    if (m) await safeEdit(m, content, rows);
+  };
 
   const tick = async (): Promise<void> => {
     const state = manager.get(userId);
@@ -346,7 +376,7 @@ function startQrPolling(
     if (Date.now() > deadline) {
       manager.clearPoll(userId);
       state.pendingInit = undefined;
-      await safeEdit(qrMessage, '⏱️ QR 已逾時。', [reloginRow('🔄 重新產生 QR')]);
+      await editQr('⏱️ QR 已逾時。', [reloginRow('🔄 重新產生 QR')]);
       return;
     }
 
@@ -355,7 +385,7 @@ function startQrPolling(
       if (outcome === 'TokenExpired') {
         manager.clearPoll(userId);
         state.pendingInit = undefined;
-        await safeEdit(qrMessage, '🔄 QR 已過期。', [reloginRow('🔄 重新產生 QR')]);
+        await editQr('🔄 QR 已過期。', [reloginRow('🔄 重新產生 QR')]);
         return;
       }
       if (outcome === 'Approved') {
@@ -365,7 +395,7 @@ function startQrPolling(
         const session = await finalizeQrLogin(state.client, init);
         state.session = session;
         await manager.persist(userId); // encrypt + store + start 60s keep-alive
-        await safeEdit(qrMessage, '✅ 登入成功!', []);
+        await editQr('✅ 登入成功!');
         await sendGameMenu(userId, state.client, dm, '請選擇遊戲:');
         return;
       }
@@ -374,7 +404,7 @@ function startQrPolling(
     } catch (e) {
       manager.clearPoll(userId);
       state.pendingInit = undefined;
-      await safeEdit(qrMessage, `❌ 登入輪詢失敗:${errText(e)}`, [reloginRow('🔄 重新產生 QR')]);
+      await editQr(`❌ 登入輪詢失敗:${errText(e)}`, [reloginRow('🔄 重新產生 QR')]);
     }
   };
 

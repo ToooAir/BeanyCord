@@ -23,8 +23,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // would mint a real pSKey against the live server — spending from a budget
 // shared with actual users, from a test run. Cut the wire so a regression fails
 // fast and offline instead.
+const getSessionKey = vi.hoisted(() =>
+  vi.fn((): Promise<string> => Promise.reject(new Error('network is disabled in this test'))),
+);
 vi.mock('../src/beanfun/login/sessionKey.js', () => ({
-  getSessionKey: () => Promise.reject(new Error('network is disabled in this test')),
+  getSessionKey,
   projectedQrWait: () => ({ waitMs: 0, ahead: 0 }),
   QR_QUEUE_MAX_WAIT_MS: 120_000,
 }));
@@ -144,5 +147,64 @@ describe('makeReplyDeliver', () => {
     await deliver({ content: 'queued' });
     await deliver({ content: 'and here is why it failed' });
     expect(f.calls).toEqual(['deferReply', 'editReply', 'followUp']);
+  });
+});
+
+/** A slash command in the bot's own DM, recording what it was answered with. */
+function slashCommand(userId: string): {
+  interaction: ChatInputCommandInteraction;
+  answers: string[];
+} {
+  const answers: string[] = [];
+  const interaction = {
+    user: { id: userId, createDM: () => Promise.resolve({ send: () => Promise.resolve(message('d')) }) },
+    context: InteractionContextType.BotDM,
+    reply: (p: BaseMessageOptions) => {
+      answers.push(String(p.content ?? '<payload>'));
+      return Promise.resolve(message('r'));
+    },
+    editReply: () => Promise.resolve(message('r')),
+    followUp: () => Promise.resolve(message('f')),
+    deferReply: () => Promise.resolve(message('r')),
+    fetchReply: () => Promise.resolve(message('r')),
+  } as unknown as ChatInputCommandInteraction;
+  return { interaction, answers };
+}
+
+const flush = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+describe('/login pressed again while one is still fetching a QR', () => {
+  it('answers at once instead of parking behind the lock', async () => {
+    // The lock is held for the whole pSKey queue wait. Parked presses sat on
+    // Discord's "thinking" state for 54 seconds in production, then resolved
+    // into QR messages that deleted each other via setActive — all to re-show a
+    // challenge that arrives as its own message anyway.
+    getSessionKey.mockImplementation(() => new Promise<string>(() => undefined));
+    const manager = new SessionManager();
+
+    const first = slashCommand('u2');
+    void handleLogin(manager, first.interaction);
+    await flush();
+
+    const second = slashCommand('u2');
+    await handleLogin(manager, second.interaction);
+
+    expect(second.answers).toHaveLength(1);
+    expect(second.answers[0]).toContain('已經有一個登入正在進行中');
+  });
+
+  it('lets the next login through once the first one is done', async () => {
+    // The flag must not outlive the attempt, or one failure locks the user out
+    // of logging in for as long as the process runs.
+    getSessionKey.mockImplementation(() => Promise.reject(new Error('nope')));
+    const manager = new SessionManager();
+
+    const first = slashCommand('u3');
+    await handleLogin(manager, first.interaction);
+    await flush();
+
+    const second = slashCommand('u3');
+    await handleLogin(manager, second.interaction);
+    expect(second.answers.join('')).not.toContain('已經有一個登入正在進行中');
   });
 });

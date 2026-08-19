@@ -124,6 +124,15 @@ export async function handleLogin(
     return;
   }
 
+  if (loginInFlight.has(userId)) {
+    // Answer now instead of joining the lock queue: see `loginInFlight`.
+    await interaction.reply({
+      content: LOGIN_IN_FLIGHT_MSG,
+      ...(isPrivateDm ? {} : { flags: MessageFlags.Ephemeral }),
+    });
+    return;
+  }
+
   if (!isPrivateDm) {
     // Guild or group DM: point the user to their 1:1 DM and deliver there, so
     // the QR / OTP never land in a channel others can read.
@@ -219,6 +228,24 @@ export function loginFailureMessage(e: unknown): BaseMessageOptions {
   return { content: `❌ 啟動登入失敗:${errText(e)}`, components: [reloginRow()] };
 }
 
+/**
+ * Users whose login is mid-flight — set before the pSKey queue is joined and
+ * cleared when the attempt ends.
+ *
+ * Needed outside the per-user lock, because the lock is exactly what a second
+ * /login would otherwise sit behind. Measured in production: with the budget
+ * spent, a queued login holds the lock for the whole wait, so presses six and
+ * seven sat on Discord's "thinking" state for 54 seconds, then resolved into
+ * QR messages that immediately deleted each other through `setActive`. Nothing
+ * about that wait was useful: all they were ever going to do was re-show the
+ * challenge the first press was already fetching, and that arrives as its own
+ * message anyway.
+ */
+const loginInFlight = new Set<string>();
+
+const LOGIN_IN_FLIGHT_MSG =
+  '⏳ 你已經有一個登入正在進行中。\nQR 準備好會直接傳給你,不用重複輸入 `/login`。';
+
 /** Below this, saying "please wait" costs more attention than the wait does. */
 const QUEUE_NOTICE_MIN_MS = 3_000;
 
@@ -271,6 +298,7 @@ async function sendFreshQr(
   deliver: Deliver,
 ): Promise<void> {
   const state = manager.resetClient(userId);
+  loginInFlight.add(userId);
   try {
     // beanfun rations pSKeys per IP and we share one, so a busy moment is a
     // wait rather than a failure. Warn BEFORE joining the queue: once in it, the
@@ -302,6 +330,8 @@ async function sendFreshQr(
     // cleaned up is what made the NEXT /login mint a second pSKey instead of
     // reusing the challenge.
     manager.remove(userId);
+  } finally {
+    loginInFlight.delete(userId);
   }
 }
 
@@ -313,6 +343,10 @@ export async function handleLoginRefresh(
   await interaction.deferUpdate();
   const userId = interaction.user.id;
   const dm = await interaction.user.createDM();
+  if (loginInFlight.has(userId)) {
+    await dm.send({ content: LOGIN_IN_FLIGHT_MSG });
+    return;
+  }
   await manager.withLock(userId, async () => {
     // Neutralise the button on the old message so it can't be re-tapped.
     await safeEdit(interaction.message as Message, '🔄 正在重新產生 QR…', []);

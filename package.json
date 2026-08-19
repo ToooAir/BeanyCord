@@ -13,6 +13,7 @@
     "probe:otp": "NODE_OPTIONS=--openssl-legacy-provider tsx src/dev/otpProbe.ts",
     "analyze:launch": "NODE_OPTIONS=--openssl-legacy-provider tsx src/dev/launchAnalyze.ts",
     "check:ggm": "tsx src/dev/checkGgm.ts",
+    "probe:rate": "tsx src/dev/rateProbe.ts",
     "bot": "NODE_OPTIONS=--openssl-legacy-provider tsx src/index.ts",
     "register": "tsx src/discord/registerCommands.ts",
     "build": "tsc -p tsconfig.build.json",

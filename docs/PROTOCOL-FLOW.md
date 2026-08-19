@@ -40,6 +40,76 @@ GET https://tw.beanfun.com/beanfun_block/bflogin/default.aspx?service=999999_T0
 最終網址的 query 上，不在任何 body 裡**，所以要讀 `finalUrl(res)`（並防禦性地掃過每個
 重導 hop）。
 
+## 階段 0 的閘：beanfun 的 IP 風控
+
+`src/beanfun/login/sessionKey.ts` · `src/core/guard.ts` · `src/dev/rateProbe.ts`
+
+整條鏈上**只有 `bflogin/default.aspx` 這一個 endpoint 有配額**。2026-08-19 實測，
+下面這些全部沒有閘（括號內是實際打到的量，都沒撞到任何上限）：
+
+| endpoint | 打法 | 結果 |
+| --- | --- | --- |
+| `echo_token.ashx`（保活） | 60 並發 × 3 輪 = 180 發 | 無閘 |
+| `game_start_step2.aspx`（列帳號） | 20 並發 × 3 輪 = 60 發 | 無閘 |
+| `QRLogin/CheckLoginStatus`（輪詢） | 80 連發 / 32 秒 | 無閘 |
+| `game_zone/`、兩個 host 的大門 | — | 無閘 |
+
+所以「重啟後所有 session 的 ping 同時打出去」和「`account.ts` 用 `Promise.all`
+一次噴 N 個角色查詢」這兩個看起來最危險的並發，量完都不是問題。
+
+### 被擋長什麼樣
+
+**HTTP 200。** 又一個用 200 說謊的 endpoint（另外兩個見〈三個最容易誤解的地方〉）。
+`ensureSuccess` 會通過，下游唯一的症狀是 pSKey 莫名其妙不見了。
+
+兩個識別標記**分別在不同地方**，而且直覺的那個不在 body 裡：
+
+| 標記 | 位置 | 內容 |
+| --- | --- | --- |
+| 檔名 | **只在重導向後的最終 URL** | `/TW/BlockIPMessage.htm` |
+| 句子 | **只在 body**（544 bytes） | `但由於短時間造訪過於頻繁，IP已自動被系統鎖定。` |
+
+任一個都足以認出，兩個都檢查是為了 beanfun 改文案或改檔名時還有一個能擋
+（`isIpBlockedPage()` / `assertNotIpBlocked()`，`src/beanfun/client.ts`）。
+
+### 三件已定案的事
+
+- **是 IP 層級。** 同一支手機，Wi-Fi 被擋、切行動網路正常。
+- **數次數，不數速率。** 同樣是第 5 次被擋，不管那五次花了 12 秒、35 秒還是 76 秒。
+- **罰則固定 4～5 分鐘，而且不會被後續請求延長。** 量了三次都一樣；罰則期間繼續打
+  不會讓它變久，所以探測恢復是免費的。
+
+### 配額與窗口寬度：**尚未定案，而且會動**
+
+這一節刻意不給數字，因為量到的數字互相矛盾：
+
+| 何時 | 方法 | 唯一相容的模型 |
+| --- | --- | --- |
+| 2026-08-19 11:36Z | 階梯：間隔從 45 秒逐步收緊，27 次成功後被拒 | **窗口 80 秒、配額 4** |
+| 2026-08-19 15:00Z | 從下面探：填滿 4 個，隔 D 秒再送一個 | **窗口 ≥ 177 秒**（D 從 120 試到 177 全被拒） |
+
+同一個 IP，相隔 3.5 小時，中間被我們反覆猛打。把兩組資料套進「滑動窗口 + 固定配額」
+逐一比對，**沒有任何一組 (W, Q) 能同時解釋兩者** —— 集合完全不相交。
+
+最合理的解釋是風控會**針對這個位址的近期行為收緊**（reputation-based）。這也不需要
+「機房 IP 額度比較低」就能解釋為什麼線上部署也撞到：那個 IP 同樣被打過。
+
+**工程上的結論是：沒有任何靜態預算能被證明安全。** 所以限流器把「被拒絕」當成唯一
+可信的校正訊號 —— 撞到就自己關禁閉（`RateGate.penalise()`），並把當下我們自己的
+足跡一起印進 log，因為那是唯一能分辨「額度被鄰居用掉」和「配額本來就更小」的東西。
+
+### 方法論：為什麼「被擋後多久恢復」量不到窗口
+
+那量到的是**罰則**。任何觸發拒絕的實驗都會立刻進入 4～5 分鐘禁閉，訊號被蓋掉。
+
+正確的做法是**在不觸發的前提下從下面探**：填滿配額 → 等 D 秒（從**第一個**請求起算）
+→ 再送一個。被拒表示第一個仍被計入（W ≥ D），放行表示它已滑出（W < D）。D 的翻轉點
+就是 W。填的過程順便校準配額 —— 填到一半被拒，那個數字就是真實配額。
+
+`npm run probe:rate -- --go --arm=window --search` 就是這個。**注意**：二分搜尋的上界
+必須真的被一次「放行」證實過，否則它只會收斂到你給的參數上；這支腳本第一次跑就掉進
+這個陷阱，現在會明說「未建立上界」而不是印出一個賺不到的區間。
+
 ## 階段 1：產生 QR Code
 
 `src/beanfun/login/qrInit.ts:18`
@@ -77,6 +147,20 @@ Body:    （完全空）
 
 回應 `ResultMessage` 只有四種：`Wait Login` / `Success` / `Failed` / `Token Expired`，
 其他值一律當協定變更拋錯。
+
+### 多人同時登入不會互相汙染
+
+`CheckLoginStatus` 的 body 是**完全空的**，所以「這是誰的 QR 場次」全由 cookie 與
+`Referer` 決定 —— 而部署裡所有人共用一個對外 IP，這是唯一可能串線的地方。
+
+2026-08-19 實測（`npm run probe:isolation`）：同一個 IP 開兩場，兩個 client 各自拿到
+不同的 pSKey、不同的 QR、以及**不同的 `GamaLoginSession` cookie**。真的用手機掃了其中
+一場之後，**只有那一場翻成 `Success`，另一場維持 `Wait Login`**。伺服器用的是每個
+client 自己的 session，不是來源位址。
+
+第二層保險在階段 3：`finalizeQrLogin` 送出的 `SessionKey` 是**呼叫者自己的 pSKey**。
+所以即使輪詢誤報，對方拿到的也只是登入失敗。實測失敗發生在 `Login/SendLogin` ——
+它對未核准的 session 根本不發表單，連 `return.aspx` 都到不了。
 
 ## 階段 3：完成登入
 
@@ -494,6 +578,8 @@ GET tw.beanfun.com/beanfun_block/generic_handlers/echo_token.ashx?webtoken=1
 | `npm run analyze:launch` | 對擷取到的 blob 離線窮舉表 / 方向 / offset |
 | `npm run check:ggm` | **問伺服器我們的 `CV`/`Hash` 還接不接受**，並比對上游 `ggm-client.json`（分支 `code`）與 `CheckVersion.ashx` |
 | `npm run capture` | 擷取真實回應，之後離線反覆迭代 |
+| `npm run probe:rate -- --go` | **找風控的天花板**：在哪裡被拒、拒絕長什麼樣、封鎖範圍多寬、持續多久。`--arm=window --search` 從下面探計數窗口；`--arm=hammer --target=…` 單獨測某個 endpoint 有沒有自己的閘 |
+| `npm run probe:isolation` | 同時開兩場登入，實掃其中一場，確認核准落在對的那一場 |
 
 執行中的 bot 每次取密碼會印一行路線判定：
 

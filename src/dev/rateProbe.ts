@@ -783,6 +783,12 @@ async function armWindow(): Promise<Probe | null> {
 
   let lo = LO_S;
   let hi = HI_S;
+  // A binary search only brackets a value if the bounds ARE bounds. `--hi` is an
+  // assumption until some trial at or below it comes back allowed; without that,
+  // the search converges on the assumption rather than on the window, and prints
+  // a bracket it never earned. It did exactly that once, which is why this flag
+  // exists.
+  let everAllowed = false;
   console.log(`binary search for W in [${lo}, ${hi}]s, stopping within ${TOL_S}s.\n`);
   while (hi - lo > TOL_S) {
     const mid = Math.round((lo + hi) / 2);
@@ -791,10 +797,26 @@ async function armWindow(): Promise<Probe | null> {
       console.log('\n>>> trial inconclusive; stopping rather than searching on bad data.');
       return null;
     }
-    if (t.refused) lo = mid;
-    else hi = mid;
-    console.log(`\n>>> W is now bracketed to [${lo}, ${hi}]s.`);
+    if (t.refused) {
+      lo = mid;
+    } else {
+      hi = mid;
+      everAllowed = true;
+    }
+    console.log(
+      everAllowed
+        ? `\n>>> W is now bracketed to [${lo}, ${hi}]s.`
+        : `\n>>> still refused at every D so far. W >= ${lo}s; no upper bound yet.`,
+    );
     if (hi - lo > TOL_S) await settle(t.refused, hi);
+  }
+
+  if (!everAllowed) {
+    console.log(`\n>>> W >= ${lo}s. NO UPPER BOUND WAS ESTABLISHED — every trial was refused,`);
+    console.log(`    so --hi=${HI_S} was never tested and is an assumption, not a result.`);
+    console.log('    Re-run with a larger --hi, and treat any earlier, narrower measurement of');
+    console.log('    this window as contradicted rather than refined.');
+    return null;
   }
   console.log(`\n>>> W is between ${lo}s and ${hi}s.`);
   console.log(`    A limiter whose window is >= ${hi}s can never be surprised by this one.`);

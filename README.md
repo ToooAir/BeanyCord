@@ -214,6 +214,10 @@ npm run probe:otp -- --write  # …and land the raw bytes in capture/ (gitignore
 npm run analyze:launch      # then work the captured blob out offline, forever
 npm run capture -- alive|dead  # per-endpoint responses for a session you control
 npm run check:ggm           # is the launcher identity we send still the accepted one
+npm run probe:rate -- --go  # find risk control's ceiling: where it refuses, what a
+                            # refusal looks like, how wide it reaches, how long it lasts
+npm run probe:rate -- --go --arm=window --search   # the counting window, probed from below
+npm run probe:isolation     # two logins at once: does a scan land on the right one
 ```
 
 `check:ggm` asks beanfun outright whether the `CV`/`Hash` we send is still
@@ -233,6 +237,27 @@ indicator, so it stays silent until something is genuinely broken. Set
 nothing would notice: the game a user picked is persisted and survives restarts,
 so a deployment sitting on legacy games can go months without sending a single
 v2 request, and the first sign would be a confused user.
+
+Beanfun also rations the login endpoint itself, per IP — and a deployment puts
+every user behind one address, so one person's impatience refuses everybody.
+Measured on 2026-08-19 by deliberately tripping it from a line that could be
+re-dialled: `bflogin/default.aspx` is the only gated endpoint in the whole chain
+(180 keep-alives fired 60 at a time, 60 account lookups fired 20 at a time, and
+80 back-to-back QR polls all passed untouched), it refuses with an HTTP 200 that redirects to
+`/TW/BlockIPMessage.htm`, it counts requests rather than rate, and a refusal
+costs a fixed four to five minutes that nothing shortens.
+
+The quota and window are deliberately **not** written down, because they moved:
+the same IP measured 4 per ~80s in the morning, and that afternoon refused a
+fifth request 177s after the first — and no single quota-and-window fits both
+runs. Risk control appears to tighten against an address's recent behaviour,
+which is enough to explain a hosted deployment being refused without invoking
+anything about datacentre IPs. So the limiter treats being refused as the only
+trustworthy correction: it penalises itself for the measured five minutes and
+logs its own footprint beside the refusal, because that footprint is the only
+thing that separates "a neighbour is spending our budget" from "the quota here
+is smaller". A constant measured somewhere — or somewhen — else is not evidence
+about now.
 
 All of it prints field names, lengths and hashes — never values. What each tool
 was built to answer, and the four wrong turns it took to get there, are in

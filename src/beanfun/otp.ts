@@ -43,6 +43,7 @@
  */
 import { safeError } from '../core/redact.js';
 import {
+  assertNotIpBlocked,
   BeanfunClient,
   boundedText,
   ensureSuccess,
@@ -132,6 +133,10 @@ async function step1Init(
 
   const res = await client.http.get(pageUrl);
   ensureSuccess(res, 'game_start_step2.aspx');
+  // Not measured to be gated, but cheap insurance against a bad misreading: the
+  // block page is HTML, so `looksLikeSessionExpiredPage` below would call it a
+  // dead session and send the user to re-login — the one path a block closes.
+  assertNotIpBlocked(res, 'game_start_step2.aspx');
   const body = boundedText(res);
 
   // Read the handoff FIRST: it decides which route this page is on, and

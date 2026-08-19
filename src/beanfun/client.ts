@@ -170,6 +170,43 @@ export function isSessionExpiredMessagePage(body: string): boolean {
   return /id="divMsg"[^>]*>\s*尚未登入/.test(body);
 }
 
+/**
+ * Whether a response is the portal's IP-block page.
+ *
+ * Measured 2026-08-19: `bflogin/default.aspx` issues at most 4 pSKeys per IP per
+ * ~5 minutes and answers the next one with a redirect to
+ * `/TW/BlockIPMessage.htm` — HTTP 200, so `ensureSuccess` passes and the only
+ * downstream symptom is a pSKey that is inexplicably missing. It counts requests
+ * rather than rate (5 refused whether they took 12s or 76s), it is scoped to the
+ * IP, and this deployment puts every user behind one egress address, so one
+ * person pressing 🔄 five times refuses everybody for five minutes. No other
+ * endpoint we measured is gated: 180 concurrent `echo_token.ashx`, 60 concurrent
+ * `game_start_step2.aspx` and 80 back-to-back `CheckLoginStatus` all passed.
+ *
+ * Two markers, because they live in different places and neither is guaranteed:
+ * the page name appears ONLY in the redirected URL (the body never mentions it),
+ * and the sentence appears ONLY in the body. Either identifies the page on its
+ * own, so a reworded page or a renamed file is still caught by the other.
+ */
+const IP_BLOCK_URL_MARKER = 'BlockIPMessage';
+const IP_BLOCK_BODY_MARKER = 'IP已自動被系統鎖定';
+
+export function isIpBlockedPage(body: string): boolean {
+  return body.includes(IP_BLOCK_BODY_MARKER);
+}
+
+/** Throw the canonical rate-limit error if `res` is that page. Call it as early
+ *  as possible — every extraction downstream would otherwise fail on its own
+ *  terms and report something that sends the user somewhere useless. */
+export function assertNotIpBlocked(res: Response, step: string): void {
+  const body = typeof res.body === 'string' ? res.body : String(res.body ?? '');
+  // Defensive `String(...)`: a helper whose job is to name a failure must not
+  // itself blow up with a TypeError on a response that has no final URL.
+  if (String(finalUrl(res) ?? '').includes(IP_BLOCK_URL_MARKER) || isIpBlockedPage(body)) {
+    throw new BeanfunError('http.ip_blocked', `${step}: beanfun has rate-limited this IP`);
+  }
+}
+
 /** Throw the canonical session-death error if `body` proves the session is gone.
  *  Call this wherever an empty/unparseable result could just mean "logged out". */
 export function assertSessionAlive(body: string, step: string): void {

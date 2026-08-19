@@ -162,6 +162,27 @@ export async function beginLogin(
   await sendFreshQr(manager, userId, dm, deliver);
 }
 
+/**
+ * What to say when a QR could not even be minted.
+ *
+ * `http.ip_blocked` gets its own message and, deliberately, NO relogin button.
+ * Measured 2026-08-19, beanfun issues 4 pSKeys per IP per ~5 minutes and this
+ * deployment routes every user through one address, so the block is shared: the
+ * button would spend the next person's turn, and pressing it is the single
+ * worst thing a user can do. Say how long to wait instead.
+ */
+export function loginFailureMessage(e: unknown): BaseMessageOptions {
+  if (e instanceof BeanfunError && e.code === 'http.ip_blocked') {
+    return {
+      content:
+        '🚦 **Beanfun 暫時擋下了登入請求**\n' +
+        '短時間內產生的 QR 太多,Beanfun 鎖住了這台機器的連線。**約 5 分鐘後**再試一次即可。\n\n' +
+        '-# 這個額度是所有使用者共用的,所以現在重試只會讓等待更久 — 請直接等 5 分鐘。',
+    };
+  }
+  return { content: `❌ 啟動登入失敗:${errText(e)}`, components: [reloginRow()] };
+}
+
 /** Reset the client and drive a fresh QR challenge. The QR message goes through
  *  `deliver`; subsequent poll edits + the game menu use `dm`. Caller holds the
  *  lock. */
@@ -181,7 +202,7 @@ async function sendFreshQr(
     await setActive(userId, msg, 'menu'); // retires any prior menu/OTP
     startQrPolling(manager, userId, dm, msg);
   } catch (e) {
-    const m = await deliver({ content: `❌ 啟動登入失敗:${errText(e)}`, components: [reloginRow()] });
+    const m = await deliver(loginFailureMessage(e));
     await setActive(userId, m, 'menu');
     manager.remove(userId);
   }

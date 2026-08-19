@@ -3,7 +3,7 @@
  * `login/session_key.rs::get_session_key_tw`: GET default.aspx, follow the
  * redirect chain, scrape `pSKey` from the FINAL URL.
  */
-import { BeanfunClient, ensureSuccess, finalUrl } from '../client.js';
+import { assertNotIpBlocked, BeanfunClient, ensureSuccess, finalUrl } from '../client.js';
 import { TW } from '../endpoints.js';
 import { BeanfunError } from '../errors.js';
 import { sessionKeyFromUrl } from '../parser.js';
@@ -13,6 +13,10 @@ export async function getSessionKey(client: BeanfunClient): Promise<string> {
     `${TW.portalBase}beanfun_block/bflogin/default.aspx?service=999999_T0`,
   );
   ensureSuccess(res, 'default.aspx');
+  // This is the one endpoint measured to have a quota, and a refusal here is an
+  // HTTP 200 whose only tell is the redirect target. Name it before the missing
+  // pSKey below reports a rate limit as a parse failure.
+  assertNotIpBlocked(res, 'default.aspx');
 
   // The key is on the final redirected URL's query. Scan the final URL first,
   // then any redirect hop, defensively.

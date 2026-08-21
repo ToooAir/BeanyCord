@@ -49,7 +49,8 @@
  *   npm run probe:rate -- --go               # arm 1: mint QR sessions until refused
  *   npm run probe:rate -- --go --arm=poll    # arm 2: poll one QR until refused
  *   npm run probe:rate -- --go --arm=hammer --target=echo --burst=60  # the ping herd, as it really lands
- *   npm run probe:rate -- --go --only=key --gap=90000 --accel=0.75   # staircase for the sustainable rate
+ *   npm run probe:rate -- --go --only=key --gap=60000 --decay=2000 --step=1 --max=40  # the rate, at 8s resolution
+ *   npm run probe:rate -- --go --only=key --gap=250 --max=8          # the burst quota, on its own
  *   npm run probe:rate -- --go --arm=window --after=100             # one window trial at D=100s
  *   npm run probe:rate -- --go --arm=window --search --lo=60 --hi=300
  *   npm run probe:rate -- --go --max=50 --gap=250
@@ -87,7 +88,21 @@ const ARM = opt('arm') ?? 'issue';
 const ONLY = opt('only') ?? 'full';
 const TARGET = opt('target') ?? 'echo';
 const ACCEL = Number(opt('accel') ?? '1');
+/**
+ * Linear staircase: subtract this many ms from the gap every `--step` survivals.
+ *
+ * `--accel` shrinks the gap geometrically, which races through the interesting
+ * region: by the time it is near the wall each stage is a large fraction of the
+ * last, so the tightest served span — the upper bound on W — lands far from the
+ * refusal and the bracket comes out wide. A fixed subtraction keeps the
+ * resolution constant all the way down: consecutive Q-spans differ by exactly
+ * `Q * decay`, so the bracket is that wide no matter where the wall turns out
+ * to be.
+ */
+const DECAY_MS = num('decay', 0);
 const STEP = num('step', 5);
+/** Whether the gap tightens at all, by either rule. */
+const TIGHTENS = ACCEL < 1 || DECAY_MS > 0;
 const BURST = Math.max(1, num('burst', 1));
 const QUOTA_HINT = Math.max(1, num('quota', 4));
 const AFTER_S = num('after', 90);
@@ -413,36 +428,102 @@ function reportTrailing(okAt: number[], at: number): void {
  * the same number and say nothing. It is the staircase — faster stages near the
  * refusal, slower ones before it — that separates them.
  */
-const QUOTA = 4;
+/**
+ * Quotas to bracket the window under.
+ *
+ * The bracket math has to assume a Q, and this address has not settled which:
+ * home runs fit Q=4, but 2026-08-19 production was equally consistent with Q=3.
+ * So print a bracket under EACH candidate.
+ *
+ * What this CANNOT do is pick between them. Simulated against every (W, Q) a
+ * staircase might meet, both candidates come back self-consistent every time —
+ * a real (W=80, Q=4) reads as a perfectly tidy (W=57, Q=3) under the other
+ * assumption. The ambiguity is structural, not a shortage of data: a staircase
+ * only ever sees requests spread out, so it measures how fast the quota REFILLS
+ * and never how deep it is.
+ *
+ * What survives is the sustained rate Q/W, which came out within 2-5% across
+ * both readings in every simulated case. That is the number this arm earns, and
+ * it is the one a limiter's steady state needs. Burst depth needs the other
+ * experiment: a back-to-back fill (--gap=250) trips on request Q+1 and reads Q
+ * straight off, assuming nothing about the window.
+ */
+const QUOTA_CANDIDATES = [3, 4];
 
-function reportWindowBracket(okAt: number[], refusedAt: number): void {
-  if (okAt.length < QUOTA + 1) {
-    console.log(`\n(need ${QUOTA + 1} successes before the refusal to bracket the window; had ${okAt.length}.)`);
-    return;
-  }
-  const lower = (refusedAt - okAt[okAt.length - QUOTA]!) / 1_000;
+interface Bracket {
+  q: number;
+  lower: number;
+  upper: number;
+  upperAt: number;
+}
 
+/**
+ * Bracket W assuming a quota of `q`.
+ *
+ *   - lower: the refusal proves q successes were still inside W, so
+ *     W >= t_refused - s(n-q)                                      [lower]
+ *   - upper: EVERY served request proves its q-th predecessor had already fallen
+ *     out, so W < min over i of s(i) - s(i-q)                      [upper]
+ *
+ * Under a monotonically tightening staircase the tightest such span is the last
+ * one — the endgame requests, at the same recent-load state as the refusal — so
+ * this upper bound already IS "count back one group from the block". Scanning
+ * every served request only matters when the gaps are not monotone.
+ */
+function bracketForQuota(okAt: number[], refusedAt: number, q: number): Bracket | null {
+  if (okAt.length < q + 1) return null;
+  const lower = (refusedAt - okAt[okAt.length - q]!) / 1_000;
   let upper = Infinity;
   let upperAt = -1;
-  for (let i = QUOTA; i < okAt.length; i++) {
-    const span = (okAt[i]! - okAt[i - QUOTA]!) / 1_000;
+  for (let i = q; i < okAt.length; i++) {
+    const span = (okAt[i]! - okAt[i - q]!) / 1_000;
     if (span < upper) {
       upper = span;
       upperAt = i + 1;
     }
   }
+  return { q, lower, upper, upperAt };
+}
 
-  console.log(`\n--- the counting window, bracketed (assuming the quota is ${QUOTA}) ---`);
-  console.log(`  lower bound : ${lower.toFixed(1)}s  — ${QUOTA} successes were still inside W when we were refused`);
-  console.log(`  upper bound : ${upper.toFixed(1)}s  — request #${upperAt} was served, so ${QUOTA} did not fit in W then`);
-
-  if (lower < upper) {
-    console.log(`\n  W is between ${lower.toFixed(1)}s and ${upper.toFixed(1)}s.`);
-    console.log(`  A limiter of ${QUOTA} per ${Math.ceil(upper)}s (or slower) can never trip this one.`);
-  } else {
-    console.log('\n  The bounds cross. Either the quota is not 4, or the limiter is not a plain');
-    console.log('  sliding window — read the timeline above directly rather than this summary.');
+function reportWindowBracket(okAt: number[], refusedAt: number): void {
+  console.log('\n--- the counting window, bracketed under each candidate quota ---');
+  const rates: number[] = [];
+  for (const q of QUOTA_CANDIDATES) {
+    const b = bracketForQuota(okAt, refusedAt, q);
+    if (!b) {
+      console.log(`  Q=${q}: need ${q + 1} successes before the refusal; had ${okAt.length}.`);
+      continue;
+    }
+    if (b.lower >= b.upper) {
+      console.log(
+        `  Q=${q}: bounds CROSS (${b.lower.toFixed(1)}s >= ${b.upper.toFixed(1)}s) — ` +
+          'the gaps were too uniform to separate them, or this is not a plain sliding window.',
+      );
+      continue;
+    }
+    const mid = (b.lower + b.upper) / 2;
+    rates.push(mid / q);
+    console.log(
+      `  Q=${q}: W in [${b.lower.toFixed(1)}s, ${b.upper.toFixed(1)}s]` +
+        `  (upper set by request #${b.upperAt})` +
+        `  => sustained 1 per ${(mid / q).toFixed(1)}s`,
+    );
   }
+
+  if (rates.length === 0) {
+    console.log('\n  No candidate produced a bracket. Read the timeline above directly.');
+    return;
+  }
+
+  // The rate is the finding; the (W, Q) split is not. Say which is which, so a
+  // later reader does not quote one candidate's W as though the run chose it.
+  const slowest = Math.max(...rates);
+  console.log(`\n  Both readings above fit this run equally well — it cannot choose between them.`);
+  console.log(`  What it DOES pin down is the sustained rate: about 1 per ${slowest.toFixed(0)}s.`);
+  console.log(`  Pace slower than that and no window of any width can fill up.`);
+  console.log(`  To pin the quota itself (the burst depth), run a back-to-back fill:`);
+  console.log(`    npm run probe:rate -- --go --only=key --gap=250 --max=8`);
+  console.log(`  It is refused on request Q+1 and reads Q off directly, assuming no window.`);
 }
 
 /**
@@ -512,15 +593,16 @@ async function sweep(
       events.push({ at: now, ok: false });
       console.log(`\n>>> refused on round ${i}, ${((now - t0) / 1_000).toFixed(1)}s into the sweep.`);
       console.log(`    ${okAt.length} requests had been served before that.`);
-      if (ACCEL < 1) console.log(`    The gap in effect was ${(gap / 1_000).toFixed(1)}s.`);
+      if (TIGHTENS) console.log(`    The gap in effect was ${(gap / 1_000).toFixed(1)}s.`);
       reportTimeline(events, t0);
       reportTrailing(okAt, now);
       reportWindowBracket(okAt, now);
       return bad;
     }
 
-    if (ACCEL < 1 && i % STEP === 0 && gap > MIN_GAP_MS) {
-      gap = Math.max(MIN_GAP_MS, Math.round(gap * ACCEL));
+    if (TIGHTENS && i % STEP === 0 && gap > MIN_GAP_MS) {
+      const next = DECAY_MS > 0 ? gap - DECAY_MS : Math.round(gap * ACCEL);
+      gap = Math.max(MIN_GAP_MS, next);
       console.log(`     ── ${STEP} in a row survived; tightening the gap to ${(gap / 1_000).toFixed(1)}s ──`);
     }
     // Not after the last round: the trailing-window report is taken at "now",
@@ -574,8 +656,16 @@ async function mintOnce(round: number): Promise<Fired> {
   return { bad: null, ok: 1 };
 }
 
+/** How the gap moves, for the run's own header — so a pasted transcript says
+ *  which staircase produced it rather than leaving it to be reconstructed. */
+function staircaseLabel(): string {
+  if (DECAY_MS > 0) return `, -${(DECAY_MS / 1_000).toFixed(1)}s every ${STEP}`;
+  if (ACCEL < 1) return `, tightening x${ACCEL} every ${STEP}`;
+  return '';
+}
+
 function armIssue(): Promise<Probe | null> {
-  const accel = ACCEL < 1 ? `, tightening x${ACCEL} every ${STEP}` : '';
+  const accel = staircaseLabel();
   return sweep(
     `arm 1 — mint QR sessions until refused (max ${MAX}, gap ${(GAP_MS / 1_000).toFixed(1)}s${accel})`,
     ONLY === 'key'
@@ -670,7 +760,7 @@ const TARGETS: Record<string, Target> = {
 function armHammer(): Promise<Probe | null> {
   const t = TARGETS[TARGET];
   if (!t) throw new Error(`unknown --target=${TARGET} (expected ${Object.keys(TARGETS).join(', ')})`);
-  const accel = ACCEL < 1 ? `, tightening x${ACCEL} every ${STEP}` : '';
+  const accel = staircaseLabel();
   const c = new BeanfunClient();
   return sweep(
     `arm 5 — hammer ${t.label} on its own (max ${MAX} rounds x${BURST}, gap ${(GAP_MS / 1_000).toFixed(1)}s${accel})`,
@@ -920,7 +1010,15 @@ function printPlan(): void {
   console.log(`  arm      : ${ARM}   (issue = mint QR sessions, poll = hammer one QR's poll)`);
   console.log(`  only     : ${ONLY}  (full = the whole /login chain, key = default.aspx alone)`);
   console.log(`  target   : ${TARGET}  (--arm=hammer only; one of ${Object.keys(TARGETS).join(', ')})`);
-  console.log(`  accel    : ${ACCEL}${ACCEL < 1 ? ` — tighten the gap every ${STEP} survivals` : ' (no staircase)'}`);
+  console.log(
+    `  staircase: ${
+      DECAY_MS > 0
+        ? `-${(DECAY_MS / 1_000).toFixed(1)}s every ${STEP} survivals (linear)`
+        : ACCEL < 1
+          ? `x${ACCEL} every ${STEP} survivals (geometric)`
+          : 'none — a flat gap'
+    }`,
+  );
   console.log(`  burst    : ${BURST}${BURST > 1 ? ' fired concurrently per round' : ' (sequential)'}`);
   console.log(
     `  window   : --arm=window fills ${QUOTA_HINT} then probes ` +
@@ -937,6 +1035,14 @@ function printPlan(): void {
 async function main(): Promise<void> {
   if (!GO) {
     printPlan();
+    return;
+  }
+  // Two staircase rules that quietly disagree would make the transcript's own
+  // header wrong about what produced it, and a measurement whose method is
+  // misreported is worse than none.
+  if (ACCEL < 1 && DECAY_MS > 0) {
+    console.error('--accel and --decay are two different staircases; pass only one.');
+    process.exitCode = 2;
     return;
   }
   if (ARM !== 'issue' && ARM !== 'poll' && ARM !== 'hammer' && ARM !== 'window') {

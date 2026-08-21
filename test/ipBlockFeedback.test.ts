@@ -25,6 +25,23 @@ import { getSessionKey, QR_MIN_INTERVAL_MS } from '../src/beanfun/login/sessionK
 const BLOCK_PAGE = '<html><body>但由於短時間造訪過於頻繁，IP已自動被系統鎖定。</body></html>';
 const BLOCK_URL = 'https://tw.beanfun.com/TW/BlockIPMessage.htm';
 
+/**
+ * Start a call and attach its handler in the same tick.
+ *
+ * `expect(p).rejects` attaches nothing until the matcher runs, and these
+ * rejections land *while* fake timers are being advanced — so the promise is
+ * briefly unhandled. Vitest reports that as an unhandled rejection and exits
+ * non-zero even though every assertion passed, which is how it reached CI: a
+ * local check that grepped for failed tests rather than reading the exit code
+ * saw nothing wrong.
+ */
+function settle<T>(p: Promise<T>): Promise<{ ok: boolean; error?: unknown }> {
+  return p.then(
+    () => ({ ok: true }),
+    (error: unknown) => ({ ok: false, error }),
+  );
+}
+
 describe('after beanfun refuses us', () => {
   it('stops firing requests that are already known to fail', async () => {
     // Fake timers because the limiter starts a boot spent: the first mint after
@@ -47,16 +64,20 @@ describe('after beanfun refuses us', () => {
     } as unknown as BeanfunClient;
 
     try {
-      const first = getSessionKey(client);
+      const first = settle(getSessionKey(client));
       await vi.advanceTimersByTimeAsync(QR_MIN_INTERVAL_MS);
-      await expect(first).rejects.toMatchObject({ code: 'http.ip_blocked' });
+      const r1 = await first;
+      expect(r1.ok).toBe(false);
+      expect(r1.error).toMatchObject({ code: 'http.ip_blocked' });
       expect(calls).toBe(1);
 
       // The gate now knows. The next caller must be refused by us, not beanfun:
       // the penalty outruns the queue deadline, so it never reaches the wire.
-      const second = getSessionKey(client);
+      const second = settle(getSessionKey(client));
       await vi.advanceTimersByTimeAsync(0);
-      await expect(second).rejects.toMatchObject({ code: 'http.ip_blocked' });
+      const r2 = await second;
+      expect(r2.ok).toBe(false);
+      expect(r2.error).toMatchObject({ code: 'http.ip_blocked' });
       expect(calls).toBe(1);
     } finally {
       vi.useRealTimers();
@@ -73,7 +94,16 @@ describe('after beanfun refuses us', () => {
       },
     } as unknown as BeanfunClient;
 
-    const err: unknown = await getSessionKey(client).catch((e: unknown) => e);
-    expect((err as { retryAfterMs?: number }).retryAfterMs).toBeGreaterThan(0);
+    // Fake timers here too: run on its own (`-t`), this test would otherwise be
+    // the one paying the boot interval, in real seconds.
+    vi.useFakeTimers();
+    try {
+      const pending = settle(getSessionKey(client));
+      await vi.advanceTimersByTimeAsync(QR_MIN_INTERVAL_MS);
+      const { error } = await pending;
+      expect((error as { retryAfterMs?: number }).retryAfterMs).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

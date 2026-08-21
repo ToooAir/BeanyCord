@@ -431,9 +431,11 @@ function reportTrailing(okAt: number[], at: number): void {
 /**
  * Quotas to bracket the window under.
  *
- * The bracket math has to assume a Q, and this address has not settled which:
- * home runs fit Q=4, but 2026-08-19 production was equally consistent with Q=3.
- * So print a bracket under EACH candidate.
+ * The bracket math has to assume a Q. On the home line it is settled: a
+ * back-to-back fill was refused on request 5 on both 2026-08-19 and 2026-08-21,
+ * so Q=4 there. Production has never been filled directly — its one refusal, on
+ * 2026-08-19, fits Q=4 with a window past 90s just as well as it fits Q=3 — so
+ * both candidates stay, and a run from a new address still gets to read both.
  *
  * What this CANNOT do is pick between them. Simulated against every (W, Q) a
  * staircase might meet, both candidates come back self-consistent every time —
@@ -486,6 +488,38 @@ function bracketForQuota(okAt: number[], refusedAt: number, q: number): Bracket 
 }
 
 function reportWindowBracket(okAt: number[], refusedAt: number): void {
+  if (okAt.length === 0) {
+    console.log('\nNothing was served before the refusal; there is nothing to bracket.');
+    return;
+  }
+
+  // A back-to-back fill and a staircase are different experiments, and only one
+  // of them can say anything about the window. Detect which this was from the
+  // data rather than from the flags, and refuse to print a bracket the run did
+  // not earn: on a fill, `bracketForQuota` will happily "prove" W < 9s under a
+  // wrong quota, because that inference IS valid given the wrong quota. The
+  // giveaway is that every trailing window holds the same count — the run has no
+  // power to separate them at all.
+  const spanS = (refusedAt - okAt[0]!) / 1_000;
+  const shortest = TRAILING_WINDOWS_S[0]!;
+  if (spanS <= shortest) {
+    console.log('\n--- this run measured the QUOTA, not the window ---');
+    console.log(
+      `  Everything landed inside ${spanS.toFixed(1)}s — shorter than the narrowest window ` +
+        `considered (${shortest}s).`,
+    );
+    console.log(
+      `  So for ANY window wider than ${spanS.toFixed(1)}s, all ${okAt.length} successes were still ` +
+        'being counted',
+    );
+    console.log('  at the moment the next one was refused.');
+    console.log(`\n  QUOTA = ${okAt.length}, read directly, assuming nothing about the window.`);
+    console.log(`  On the window this says only W >= ${spanS.toFixed(1)}s, which is no constraint at all.`);
+    console.log('  For the window, run the staircase:');
+    console.log('    npm run probe:rate -- --go --only=key --gap=60000 --decay=2000 --step=1 --max=40');
+    return;
+  }
+
   console.log('\n--- the counting window, bracketed under each candidate quota ---');
   const rates: number[] = [];
   for (const q of QUOTA_CANDIDATES) {

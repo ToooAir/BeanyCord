@@ -16,10 +16,10 @@
  * Its own file because the budget is module state — a fresh registry per test
  * file is what keeps this measurement from inheriting another one's.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { BeanfunClient } from '../src/beanfun/client.js';
-import { getSessionKey } from '../src/beanfun/login/sessionKey.js';
+import { getSessionKey, QR_MIN_INTERVAL_MS } from '../src/beanfun/login/sessionKey.js';
 
 /** The real page's identifying sentence; the file name lives only on the URL. */
 const BLOCK_PAGE = '<html><body>但由於短時間造訪過於頻繁，IP已自動被系統鎖定。</body></html>';
@@ -27,6 +27,10 @@ const BLOCK_URL = 'https://tw.beanfun.com/TW/BlockIPMessage.htm';
 
 describe('after beanfun refuses us', () => {
   it('stops firing requests that are already known to fail', async () => {
+    // Fake timers because the limiter starts a boot spent: the first mint after
+    // a process starts waits one interval by design, and a test that let that
+    // elapse for real would take 30 seconds.
+    vi.useFakeTimers();
     let calls = 0;
     const client = {
       http: {
@@ -42,12 +46,21 @@ describe('after beanfun refuses us', () => {
       },
     } as unknown as BeanfunClient;
 
-    await expect(getSessionKey(client)).rejects.toMatchObject({ code: 'http.ip_blocked' });
-    expect(calls).toBe(1);
+    try {
+      const first = getSessionKey(client);
+      await vi.advanceTimersByTimeAsync(QR_MIN_INTERVAL_MS);
+      await expect(first).rejects.toMatchObject({ code: 'http.ip_blocked' });
+      expect(calls).toBe(1);
 
-    // The gate now knows. The next caller must be refused by us, not by beanfun.
-    await expect(getSessionKey(client)).rejects.toMatchObject({ code: 'http.ip_blocked' });
-    expect(calls).toBe(1);
+      // The gate now knows. The next caller must be refused by us, not beanfun:
+      // the penalty outruns the queue deadline, so it never reaches the wire.
+      const second = getSessionKey(client);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(second).rejects.toMatchObject({ code: 'http.ip_blocked' });
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('tells the caller how much of the penalty is left', async () => {

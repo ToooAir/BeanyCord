@@ -216,7 +216,9 @@ npm run capture -- alive|dead  # per-endpoint responses for a session you contro
 npm run check:ggm           # is the launcher identity we send still the accepted one
 npm run probe:rate -- --go  # find risk control's ceiling: where it refuses, what a
                             # refusal looks like, how wide it reaches, how long it lasts
-npm run probe:rate -- --go --arm=window --search   # the counting window, probed from below
+npm run probe:rate -- --go --only=key --gap=250 --max=8   # the quota, off a fill
+npm run probe:rate -- --go --only=key --gap=60000 --decay=2000 --step=1 --max=40
+                            # the window, off a staircase
 npm run probe:isolation     # two logins at once: does a scan land on the right one
 ```
 
@@ -240,24 +242,38 @@ v2 request, and the first sign would be a confused user.
 
 Beanfun also rations the login endpoint itself, per IP — and a deployment puts
 every user behind one address, so one person's impatience refuses everybody.
-Measured on 2026-08-19 by deliberately tripping it from a line that could be
-re-dialled: `bflogin/default.aspx` is the only gated endpoint in the whole chain
-(180 keep-alives fired 60 at a time, 60 account lookups fired 20 at a time, and
-80 back-to-back QR polls all passed untouched), it refuses with an HTTP 200 that redirects to
+Measured by deliberately tripping it from a line that could be re-dialled:
+`bflogin/default.aspx` is the only gated endpoint in the whole chain (180
+keep-alives fired 60 at a time, 60 account lookups fired 20 at a time, and 80
+back-to-back QR polls all passed untouched, and all of them keep answering while
+a block is in force — an incident stops new logins without touching anyone
+already signed in). It refuses with an HTTP 200 that redirects to
 `/TW/BlockIPMessage.htm`, it counts requests rather than rate, and a refusal
-costs a fixed four to five minutes that nothing shortens.
+costs 4.5 to 4.8 minutes that nothing shortens.
 
-The quota and window are deliberately **not** written down, because they moved:
-the same IP measured 4 per ~80s in the morning, and that afternoon refused a
-fifth request 177s after the first — and no single quota-and-window fits both
-runs. Risk control appears to tighten against an address's recent behaviour,
-which is enough to explain a hosted deployment being refused without invoking
-anything about datacentre IPs. So the limiter treats being refused as the only
-trustworthy correction: it penalises itself for the measured five minutes and
-logs its own footprint beside the refusal, because that footprint is the only
-thing that separates "a neighbour is spending our budget" from "the quota here
-is smaller". A constant measured somewhere — or somewhen — else is not evidence
-about now.
+The quota is **4 per ~80-second sliding window**. The depth was read directly off
+a back-to-back fill — refused on the fifth, assuming nothing about the window —
+and the width from two staircases of different shapes two days apart, whose
+brackets intersect in a 2.4-second span.
+
+The limiter paces one request every 30 seconds behind a single shared FIFO
+queue. At that spacing the only requests still inside beanfun's ~80s window when
+we send are the ones at -30s and -60s, so beanfun sees two and it takes four to
+refuse.
+
+It is an interval rather than a budget **because of restarts**: our counter is in
+memory and beanfun's is not, so a budget hands its whole burst to whoever asks
+first and a restart hands it out again — three logins, a redeploy, three more,
+and six land in one 80-second window. An interval has no burst to give back, and
+seeding it at boot closes even the single-request leak. The price is that a
+second person logging in at the same moment waits 30s.
+
+What it cannot defend against is a neighbour: production leaves through a shared
+egress, so somebody else's pSKeys land in the same per-IP counter unseen. So the
+limiter treats being refused as the only trustworthy correction — it penalises
+itself for the measured five minutes and logs its own footprint beside the
+refusal, because that footprint is the only thing separating "a neighbour spent
+it" from "the quota here is smaller".
 
 All of it prints field names, lengths and hashes — never values. What each tool
 was built to answer, and the four wrong turns it took to get there, are in

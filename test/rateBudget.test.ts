@@ -1,19 +1,25 @@
 /**
  * Staying under beanfun's pSKey quota.
  *
- * Measured 2026-08-19 by tripping it repeatedly from a home line: `default.aspx`
- * serves at most 4 pSKey issuances per IP in any ~80-second sliding window
- * (bracketed to 79.2s <= W < 83.6s from one run of 27 successes and a refusal),
- * and answers the request that breaks the rule with `/TW/BlockIPMessage.htm` for
- * a fixed 4-5 minutes. Every user of a deployment leaves through one egress IP,
- * so one trip refuses everybody at once — which is why the budget is enforced at
- * the endpoint rather than per user.
+ * Measured from a home line on 2026-08-19 and 2026-08-21: `default.aspx` serves
+ * at most **4 pSKeys per IP in any ~80-second sliding window** — the quota read
+ * off a back-to-back fill, the width bracketed by two staircases whose intervals
+ * intersect at [79.2, 81.6]s — and answers the request that breaks the rule with
+ * `/TW/BlockIPMessage.htm` for 4.5-4.8 minutes. Every user of a deployment leaves
+ * through one egress IP, so one trip refuses everybody at once, which is why this
+ * is enforced at the endpoint rather than per user.
  *
- * The safety argument is not "90 feels far enough from 80". It is that our
- * window is strictly WIDER than beanfun's, so beanfun's window is always a
- * subset of one of ours and can never hold a 5th request. The property test
- * below is that argument, executed — and it is followed by a demonstration that
- * a narrower window fails it, so the property is not passing vacuously.
+ * What ships is a minimum interval. Two properties are asserted here, both as
+ * executable arguments rather than as chosen-looking constants:
+ *
+ *   1. **Steady state** — at a 30s spacing only the requests at -30s and -60s are
+ *      still inside beanfun's ~80s window when we send, so it sees two and needs
+ *      four. Driven under unlimited demand, at both ends of the measured bracket.
+ *   2. **Across a restart** — our counter is in memory and beanfun's is not, so
+ *      the policy has to survive losing its own state. A burst budget does not;
+ *      that is asserted too, because it is why this is an interval.
+ *
+ * Each is followed by a case that FAILS it, so neither passes vacuously.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -23,33 +29,29 @@ import type { BeanfunClient } from '../src/beanfun/client.js';
 import { BeanfunError } from '../src/beanfun/errors.js';
 import {
   getSessionKey,
-  QR_BUDGET_LIMIT,
-  QR_BUDGET_WINDOW_MS,
+  QR_MIN_INTERVAL_MS,
   QR_QUEUE_MAX_WAIT_MS,
 } from '../src/beanfun/login/sessionKey.js';
 import { RateGate, SlidingWindow } from '../src/core/guard.js';
 import { deliverQr, loginFailureMessage, queueNotice } from '../src/discord/flow.js';
 
-/** The widest counting window the home measurement allows beanfun to have. */
+/** Both ends of the measured bracket. The wider end is the harder case for us,
+ *  the narrower one is asserted anyway rather than assumed to be easier. */
 const MEASURED_W_MS = 83_600;
+const MEASURED_W_NARROW_MS = 79_200;
 const SERVER_QUOTA = 4;
 
-/**
- * ...and what production then showed the home numbers do not cover.
- *
- * 2026-08-19 a mint the model called safe was refused: four inside 35s, the
- * fifth sent at t1+90s with the earlier ones 55/67/79/90s old. Either the oldest
- * had aged out and three were enough to refuse us — a quota of 3 — or the window
- * reaches past 90s. The refusal cannot tell those apart, so what ships has to
- * survive both, and the tests assert both rather than the one that was measured
- * somewhere else.
- */
+/** A quota of 3 instead of 4 — not measured anywhere, but cheap to hold, and the
+ *  measurement comes from a different address than the one that serves users. */
 const HOSTILE_QUOTA = 3;
-const HOSTILE_W_MS = 90_000;
 
-/** What we ship — imported, not restated, so changing it re-runs the proof. */
-const OUR_LIMIT = QR_BUDGET_LIMIT;
-const OUR_WINDOW_MS = QR_BUDGET_WINDOW_MS;
+/**
+ * What we ship. A limit of one per interval IS a minimum interval, so the limit
+ * is structural and only the interval is imported — restate it and a future
+ * change to the constant would stop re-running this proof.
+ */
+const OUR_LIMIT = 1;
+const OUR_WINDOW_MS = QR_MIN_INTERVAL_MS;
 
 describe('SlidingWindow', () => {
   it('spends a burst up to the limit, then refuses', () => {
@@ -106,6 +108,27 @@ function firstRefusal(schedule: number[], windowMs: number, quota = SERVER_QUOTA
   return null;
 }
 
+/**
+ * Replays restarts: our limiter loses its state at each one, beanfun's counter
+ * does not. Demand is unlimited throughout, so what comes out is the fastest
+ * schedule the policy can produce — the one that has to be safe.
+ */
+function acrossRestarts(
+  limit: number,
+  windowMs: number,
+  seedOnBoot: boolean,
+  restartsAt: number[],
+): number | null {
+  const sent: number[] = [];
+  let t = 0;
+  for (const end of [...restartsAt, 600_000]) {
+    const w = new SlidingWindow(limit, windowMs, () => t);
+    if (seedOnBoot) w.take();
+    for (; t < end; t += 1_000) if (w.take()) sent.push(t);
+  }
+  return firstRefusal(sent, MEASURED_W_MS);
+}
+
 describe('the shipped budget, against the server we measured', () => {
   /** Hammer the limiter once a second for an hour and collect what it lets out. */
   const drive = (limit: number, windowMs: number): number[] => {
@@ -123,7 +146,20 @@ describe('the shipped budget, against the server we measured', () => {
   it('still holds if beanfun window is actually the narrow end of the bracket', () => {
     // A narrower server window is strictly easier on us; assert it rather than
     // assume it, since the bracket is the measurement and not a single number.
-    expect(firstRefusal(drive(OUR_LIMIT, OUR_WINDOW_MS), 79_200)).toBeNull();
+    expect(firstRefusal(drive(OUR_LIMIT, OUR_WINDOW_MS), MEASURED_W_NARROW_MS)).toBeNull();
+  });
+
+  it('leaves beanfun looking at two of ours, not three', () => {
+    // The headroom, stated directly rather than inferred from "nothing was
+    // refused". Two is what the previous 3-per-120s budget also left, so this
+    // change bought throughput without spending margin — and a bare pass/fail
+    // would not have shown that.
+    const sent = drive(OUR_LIMIT, OUR_WINDOW_MS);
+    const seen = Math.max(
+      ...sent.map((t) => sent.filter((s) => s < t && t - s < MEASURED_W_MS).length),
+    );
+    expect(seen).toBe(2);
+    expect(seen).toBeLessThan(SERVER_QUOTA);
   });
 
   it('holds when callers QUEUE for slots rather than retrying', async () => {
@@ -145,19 +181,47 @@ describe('the shipped budget, against the server we measured', () => {
     expect(firstRefusal(emitted, MEASURED_W_MS)).toBeNull();
   });
 
-  it('holds against a quota of 3, the harsher reading of the production refusal', () => {
+  it('holds even if the quota on this address were 3 rather than the 4 measured', () => {
     expect(firstRefusal(drive(OUR_LIMIT, OUR_WINDOW_MS), MEASURED_W_MS, HOSTILE_QUOTA)).toBeNull();
   });
 
-  it('holds against a window reaching past 90s, the other reading', () => {
-    expect(firstRefusal(drive(OUR_LIMIT, OUR_WINDOW_MS), HOSTILE_W_MS, HOSTILE_QUOTA)).toBeNull();
+  it('survives a restart, which is why this is an interval and not a budget', () => {
+    // Our counter is in memory; beanfun's is not. So the policy has to hold
+    // across losing its own state, and a burst budget cannot: it hands its whole
+    // burst to whoever asks first, and a restart hands it out a second time.
+    expect(acrossRestarts(OUR_LIMIT, OUR_WINDOW_MS, true, [125_000, 126_000, 127_000])).toBeNull();
   });
 
-  it('and the property is not vacuous: a window narrower than beanfun fails it', () => {
-    // 75s < 83.6s, so beanfun window is no longer a subset of ours and four of
-    // our permits can land inside it alongside a fifth. This is the mistake the
-    // real limiter is one constant away from.
-    expect(firstRefusal(drive(OUR_LIMIT, 75_000), MEASURED_W_MS)).not.toBeNull();
+  it('...and a burst budget does not: three, a redeploy, three more', () => {
+    // The falsification for choosing an interval. 3 per 120s is what shipped
+    // before, and it is refused within seconds of a restart — six requests land
+    // inside one 80s window while our own window still reads empty.
+    expect(acrossRestarts(3, 120_000, false, [5_000])).not.toBeNull();
+  });
+
+  it('...and without the boot seed, a crash loop leaks one request per restart', () => {
+    // The falsification for seeding at boot. One restart is survivable on its
+    // own; a process that restarts three times in a row is not, because each
+    // fresh start contributes a request that our window has no memory of.
+    expect(acrossRestarts(OUR_LIMIT, OUR_WINDOW_MS, false, [125_000, 126_000, 127_000])).not.toBeNull();
+  });
+
+  it('and the shipped module really does start a boot spent', async () => {
+    // The restart properties above are proved against a locally-built window.
+    // This asserts sessionKey.ts itself seeds one at import, because otherwise
+    // deleting that single line would silently give every restart a free
+    // request and none of the tests above would notice — which is exactly what
+    // happened when this was checked by deleting it.
+    vi.resetModules();
+    const fresh = await import('../src/beanfun/login/sessionKey.js');
+    expect(fresh.projectedQrWait().waitMs).toBeGreaterThan(0);
+  });
+
+  it('and the property is not vacuous: a 20s interval fails it', () => {
+    // At 20s, four of ours (-20, -40, -60, -80) fit inside an 83.6s window and
+    // the fifth is refused. This is what the margin at 30s consists of, and the
+    // real limiter is one constant away from losing it.
+    expect(firstRefusal(drive(OUR_LIMIT, 20_000), MEASURED_W_MS)).not.toBeNull();
   });
 });
 
@@ -368,11 +432,15 @@ describe('getSessionKey', () => {
 
     vi.useFakeTimers();
     try {
-      for (let i = 0; i < OUR_LIMIT; i++) expect(await getSessionKey(client)).toBe('abc123');
+      // Drain whatever the module-level boot seed is still holding, so the
+      // assertion below does not depend on how long ago this file was imported.
+      const first = getSessionKey(client);
+      await vi.advanceTimersByTimeAsync(OUR_WINDOW_MS);
+      expect(await first).toBe('abc123');
 
-      // The point of the rewrite: the 5th waits rather than being turned away.
-      // Asserting it is still unsettled is what separates "queued" from both
-      // "served" and "refused" — the earlier version of this budget threw here.
+      // The point of the rewrite: the next caller waits rather than being turned
+      // away. Asserting it is still unsettled is what separates "queued" from
+      // both "served" and "refused" — the earlier budget threw here.
       let settled = false;
       const fifth = getSessionKey(client).then(
         (v) => {

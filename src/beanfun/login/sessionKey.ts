@@ -12,57 +12,93 @@ import { sessionKeyFromUrl } from '../parser.js';
 /**
  * The one request beanfun rations, and the budget that keeps us under it.
  *
- * Measured 2026-08-19 by tripping it repeatedly: `default.aspx` serves at most
- * **4 pSKey issuances per IP in any ~80-second sliding window** (bracketed to
- * 79.2s <= W < 83.6s from a run of 27 successes and one refusal), and answers
- * the one that breaks the rule with `/TW/BlockIPMessage.htm` for a **fixed 4-5
- * minutes** — measured three times, and further requests during it neither
- * extend nor shorten the wait. It counts requests, not rate: five were refused
- * whether they took 12s, 35s or 76s.
+ * Measured from a home line, twice, with two experiments that each pin down what
+ * the other cannot (full write-up in `docs/PROTOCOL-FLOW.md`):
  *
- * Those numbers were measured from a home line, and 2026-08-19 production
- * refused a mint that the model said was safe: four mints inside 35s, then a
- * fifth sent at t1+90s. At that moment our earlier mints were 55s, 67s, 79s and
- * 90s old, so either the 90s-old one had already aged out and beanfun refused us
- * with only THREE inside its window — a quota of 3 here, not 4 — or the window
- * is at least 90s wide rather than the 83.6s measured. The observation cannot
- * separate those two, and both are ways of saying the home numbers do not
- * transfer to this address. A shared datacentre egress spending the same budget
- * would look identical again.
+ *   - **quota 4** — a back-to-back fill is refused on the fifth request. Every
+ *     request is inside any plausible window, so this reads the depth directly
+ *     and assumes nothing about the width. Same answer on 2026-08-19 and -21.
+ *   - **window ~80s** — two staircases of different shapes two days apart
+ *     bracket it to [79.2, 83.6] and [71.5, 81.6]; the intersection is 2.4s wide.
+ *     A staircase cannot measure the quota (a real 80s/4 reads as a perfectly
+ *     self-consistent 57s/3), which is why the fill exists.
+ *   - **penalty 4.5-4.8 minutes**, from intersecting three recovery intervals,
+ *     and nothing we do during it makes it longer or shorter.
  *
- * 3 per 120s is the intersection: at most 3 land in any 80s or 90s window, so at
- * most 2 precede a request, which clears a quota of 3 and a quota of 4 alike. It
- * is not a guess at the real limit, it is the strongest claim still consistent
- * with everything observed. Sustained that is one login every 40s, which is far
- * more than the login rate of a bot whose users stay signed in for days, while
- * being wrong the other way costs every user a five-minute outage at once.
- *
- * It lives here rather than in the Discord layer so no future caller can route
- * around it: the budget belongs to the endpoint, not to one of its users. And
- * it is ONE SHARED QUEUE rather than a per-user throttle: beanfun counts
- * addresses and cannot see users at all, so rationing per person would refuse
+ * The budget lives here rather than in the Discord layer so no future caller can
+ * route around it: it belongs to the endpoint, not to one of its users. And it is
+ * ONE SHARED QUEUE rather than a per-user throttle, because beanfun counts
+ * addresses and cannot see users at all — rationing per person would refuse
  * someone the budget could have served while adding nothing to safety. Callers
  * wait their turn instead, and fairness is the order they arrived in.
+ *
+ * ## Why one every 30 seconds is safe, and not merely cautious
+ *
+ * Not "30 feels far enough". At a strict 30-second spacing, the requests that
+ * are still inside beanfun's ~80s window when we send are the ones at -30s and
+ * -60s — the one at -90s has already aged out. So beanfun **sees two**, and it
+ * needs four to refuse. That is the same headroom the previous 3-per-120s budget
+ * had, at a third more throughput.
+ *
+ * It holds at both ends of the measured bracket (79.2s and 83.6s), and the
+ * window would have to widen by 50% before four of ours could fit — or by 12% if
+ * the quota were really 3.
+ *
+ * ## Why an interval and not a burst budget
+ *
+ * Because of the restart. This state is in memory; beanfun's is not. A budget of
+ * 3 hands three permits to whoever asks first, so three logins, a redeploy, and
+ * three more put SIX requests inside one 80-second window and the fifth is
+ * refused — simulated against the measured server, at essentially every restart
+ * timing. An interval has no burst to hand back, so a restart can leak at most
+ * one extra request, and seeding the window at boot (below) removes even that.
+ *
+ * The price is that a second person logging in at the same moment waits 30s
+ * instead of nothing. Logins are rare in a bot whose users stay signed in for
+ * days; a five-minute outage for everybody is not a fair trade for saving them.
+ *
+ * ## What this cannot defend against
+ *
+ * A neighbour. Production leaves through a shared egress, so somebody else's
+ * pSKeys land in the same per-IP counter and no budget of ours can see them.
+ * That is why a refusal is treated as the only trustworthy correction
+ * (`penalise()`), with our own footprint logged beside it — the footprint is what
+ * separates "a neighbour spent it" from "the quota here is smaller".
+ *
+ * (An earlier version of this comment cited a 2026-08-19 production refusal as
+ * evidence that this address has a quota of 3 or a window past 90s. That is
+ * withdrawn: the request ages behind it were reconstructed from what a user
+ * remembered pressing, not read from a log — `footprint()` did not exist yet —
+ * and the address had been hammered by testing that day. It is not evidence
+ * strong enough to overturn two clean, instrumented measurements.)
  */
 // Exported so the test suite checks THESE numbers against the measured server,
 // rather than a copy of them that could drift apart silently.
-export const QR_BUDGET_LIMIT = 3;
-export const QR_BUDGET_WINDOW_MS = 120_000;
+export const QR_MIN_INTERVAL_MS = 30_000;
 
 /** How long a caller may be queued before a refusal is the kinder answer. Well
  *  inside the 15 minutes a deferred Discord interaction stays editable, so a
  *  queued user always gets a real reply rather than a silent expiry. */
 export const QR_QUEUE_MAX_WAIT_MS = 120_000;
 
-/** What a refusal costs, measured three times as 4.0-4.9 minutes and unaffected
- *  by anything we do during it. Rounded up: overshooting delays a login,
- *  undershooting spends the whole deployment's next attempt on a doomed call. */
+/** What a refusal costs. Three recovery measurements each bound it to an
+ *  interval, and those intervals intersect at 4.5-4.8 minutes; nothing we do
+ *  during it makes any difference. Five covers that upper end — undershooting
+ *  would spend the whole deployment's next attempt on a doomed call, which then
+ *  starts the penalty over. */
 export const IP_BLOCK_PENALTY_MS = 5 * 60_000;
 
-const qrGate = new RateGate(
-  new SlidingWindow(QR_BUDGET_LIMIT, QR_BUDGET_WINDOW_MS),
-  QR_QUEUE_MAX_WAIT_MS,
-);
+/** A limit of one per interval IS a minimum interval — no separate mechanism. */
+const qrWindow = new SlidingWindow(1, QR_MIN_INTERVAL_MS);
+
+// Start as though a mint just happened. Without this, a process that restarts
+// twice in quick succession (a crash loop, a rolled-back deploy) gets a free
+// request each time, and those stack inside beanfun's window even though ours
+// keeps looking empty. The cost is that the first login after a boot waits one
+// interval, which is 30 seconds once per deploy.
+qrWindow.take();
+
+const qrGate = new RateGate(qrWindow, QR_QUEUE_MAX_WAIT_MS);
 
 /** Roughly how long the next `getSessionKey` would spend queued, and how many
  *  callers are already waiting — for deciding whether to warn a human first. */
@@ -94,7 +130,7 @@ export async function getSessionKey(client: BeanfunClient): Promise<string> {
     }
     throw new BeanfunError(
       'login.rate_budget',
-      `pSKey queue longer than ${QR_QUEUE_MAX_WAIT_MS / 1_000}s (${QR_BUDGET_LIMIT} per ${QR_BUDGET_WINDOW_MS / 1_000}s)`,
+      `pSKey queue longer than ${QR_QUEUE_MAX_WAIT_MS / 1_000}s (one per ${QR_MIN_INTERVAL_MS / 1_000}s)`,
       turn.retryAfterMs,
     );
   }
@@ -126,7 +162,7 @@ export async function getSessionKey(client: BeanfunClient): Promise<string> {
     // smaller here", "the window is a different shape" and "this address is
     // shared with someone else spending it".
     console.error(
-      `[login] refused by beanfun with budget ${QR_BUDGET_LIMIT}/${QR_BUDGET_WINDOW_MS / 1_000}s — ${qrGate.footprint()}`,
+      `[login] refused by beanfun while pacing one per ${QR_MIN_INTERVAL_MS / 1_000}s — ${qrGate.footprint()}`,
     );
     throw e;
   }

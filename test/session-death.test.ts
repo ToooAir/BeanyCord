@@ -18,13 +18,22 @@ import { getAccounts } from '../src/beanfun/account.js';
 import type { BeanfunClient } from '../src/beanfun/client.js';
 import { BeanfunError } from '../src/beanfun/errors.js';
 import { listGames } from '../src/beanfun/games.js';
+import { getOtp } from '../src/beanfun/otp.js';
 import { SessionManager } from '../src/core/sessionManager.js';
 import type { DMChannel, Message } from 'discord.js';
-import type { Session } from '../src/beanfun/types.js';
+import type { ServiceAccount, Session } from '../src/beanfun/types.js';
 
 /** The portal's real "尚未登入" message page, captured from a dead session. */
 const LOGIN_PAGE = readFileSync(
   fileURLToPath(new URL('./fixtures/account_list.session-expired.txt', import.meta.url)),
+  'utf8',
+);
+
+/** What `game_start_step2.aspx` really answers a dead session with (2026-08-14):
+ *  a generic "程式發生錯誤 / Err Msg" page. Note what it does NOT carry — no
+ *  `divMsg 尚未登入`, and no `GetResultByLongPolling` key. */
+const ERR_MSG_PAGE = readFileSync(
+  fileURLToPath(new URL('./fixtures/game_start_step2.session-dead.txt', import.meta.url)),
   'utf8',
 );
 
@@ -90,6 +99,39 @@ describe('a login page must never look like an empty result', () => {
     await expect(listGames(clientReturning(empty))).rejects.toMatchObject({
       code: 'games.empty_catalogue',
     });
+  });
+});
+
+/**
+ * The premise everything downstream is built on.
+ *
+ * `flow.test.ts` exists to make sure a claimed death is confirmed against
+ * echo_token before a live user is logged out, because the OTP path's death
+ * signal is a GUESS. That whole argument rests on one unstated fact: that the
+ * page beanfun really serves here produces `otp.session_expired` in the first
+ * place. Nothing checked it — flow.test.ts drives its cases by injecting the
+ * error directly, and merely read this fixture to assert it contained a string,
+ * which tested the fixture rather than the code.
+ */
+describe('the page a dead session gets from game_start_step2.aspx', () => {
+  const OTP_SESSION: Session = { ...SESSION, serviceCode: '610074', serviceRegion: 'T9' };
+  const OTP_ACCOUNT = { sid: 'A1', ssn: '1', sname: 'char', screatetime: null } as ServiceAccount;
+
+  it('is what makes step 1 report a dead session at all', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await expect(
+      getOtp(clientReturning(ERR_MSG_PAGE), OTP_SESSION, OTP_ACCOUNT, '610074', 'T9'),
+    ).rejects.toMatchObject({ code: 'otp.session_expired' });
+  });
+
+  it('is ALSO what a transient server fault looks like — hence the confirmation', async () => {
+    // The reason the verdict cannot be trusted on its own: this page says
+    // "程式發生錯誤", not "you are logged out". It carries none of the portal's
+    // actual death markers, so the code reaches `otp.session_expired` only by
+    // elimination — the long-polling key was missing and the body was HTML.
+    expect(ERR_MSG_PAGE).toContain('程式發生錯誤');
+    expect(ERR_MSG_PAGE).not.toContain('尚未登入');
+    expect(ERR_MSG_PAGE).not.toContain('GetResultByLongPolling');
   });
 });
 

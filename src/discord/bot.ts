@@ -170,7 +170,18 @@ function parseAllowlist(raw: string | undefined): Set<string> {
   );
 }
 
-/** Constant-time string compare (avoids leaking the code length/prefix by timing). */
+/**
+ * Constant-time compare of the code's CONTENT — no prefix oracle, so a guess
+ * cannot be extended one character at a time.
+ *
+ * It does not hide the code's LENGTH: a mismatch there returns before
+ * `timingSafeEqual` is reached, which is unavoidable given the primitive takes
+ * equal-length buffers. Said plainly because the comment here used to claim
+ * otherwise, and a guard whose comment overstates it is worse than one with no
+ * comment. Length is cheap to learn and worth little on its own — the search
+ * space it leaves is still the whole code — and `codeLockout` caps the attempt
+ * rate regardless.
+ */
 function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);

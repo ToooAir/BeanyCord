@@ -17,12 +17,18 @@ import { safeError } from './redact.js';
 import type { SessionStore } from './store.js';
 
 /** WPF pingWorker cadence (#237): keep the server-side session warm every 60s. */
-const PING_INTERVAL_MS = 60_000;
+export const PING_INTERVAL_MS = 60_000;
 
-/** Consecutive keep-alive failures before we declare the session dead. One or
- *  two failures are routinely transient (network blip, risk control); five in a
- *  row (~5 min) means the server-side session is gone for real. */
-const PING_FAIL_THRESHOLD = 5;
+/**
+ * Consecutive keep-alive failures before we declare the session dead. One or
+ * two failures are routinely transient (network blip, risk control); five in a
+ * row (~5 min) means the server-side session is gone for real.
+ *
+ * Exported alongside the cadence because the two only mean anything together:
+ * what was chosen is a ~5 minute tolerance, and the tests assert that product
+ * rather than either number on its own.
+ */
+export const PING_FAIL_THRESHOLD = 5;
 
 /** Minimal FIFO async mutex — chains tasks so only one runs at a time. */
 class Mutex {

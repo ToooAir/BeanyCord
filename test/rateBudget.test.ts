@@ -29,6 +29,7 @@ import type { BeanfunClient } from '../src/beanfun/client.js';
 import { BeanfunError } from '../src/beanfun/errors.js';
 import {
   getSessionKey,
+  QR_LIMIT,
   QR_MIN_INTERVAL_MS,
   QR_QUEUE_MAX_WAIT_MS,
 } from '../src/beanfun/login/sessionKey.js';
@@ -46,11 +47,17 @@ const SERVER_QUOTA = 4;
 const HOSTILE_QUOTA = 3;
 
 /**
- * What we ship. A limit of one per interval IS a minimum interval, so the limit
- * is structural and only the interval is imported — restate it and a future
- * change to the constant would stop re-running this proof.
+ * What we ship — both numbers imported, neither restated.
+ *
+ * An earlier version hardcoded the limit as 1 on the grounds that "one per
+ * interval IS a minimum interval, so the limit is structural". It is not: the
+ * proofs below build their own `SlidingWindow` from these two values, so a
+ * hardcoded 1 would keep proving a policy the module had stopped shipping.
+ * Checked by changing the module to a limit of 2 — every proof here still
+ * passed, and only the boot-seed test noticed, with a message about `waitMs`
+ * that pointed nowhere near the real problem.
  */
-const OUR_LIMIT = 1;
+const OUR_LIMIT = QR_LIMIT;
 const OUR_WINDOW_MS = QR_MIN_INTERVAL_MS;
 
 describe('SlidingWindow', () => {

@@ -5,14 +5,16 @@
  * ("🔒 登入已失效") without dropping it, so /status still answered "✅ 已登入".
  *
  * Counterweight: the OTP path's death signal is a guess. `game_start_step2.aspx`
- * answers a dead session with a generic "程式發生錯誤" page (see
- * test/fixtures/game_start_step2.session-dead.txt) that a transient server fault
- * produces too — so a claimed death must be confirmed against echo_token before
- * we log a live user out.
+ * answers a dead session with a generic "程式發生錯誤" page that a transient
+ * server fault produces too — so a claimed death must be confirmed against
+ * echo_token before we log a live user out.
+ *
+ * That premise — that the real page does produce `otp.session_expired`, and by
+ * elimination rather than by saying so — is proved in `session-death.test.ts`
+ * against the captured fixture. The cases here inject the error directly,
+ * because what they are about is the VERDICT: given a claimed death, is the
+ * session dropped or kept?
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BeanfunError } from '../src/beanfun/errors.js';
@@ -26,12 +28,6 @@ vi.mock('../src/beanfun/otp.js', () => ({ getOtp }));
 const { deliverOtp } = await import('../src/discord/flow.js');
 
 const ACCOUNT: ServiceAccount = { sid: 'sid-1', sname: 'acct' } as ServiceAccount;
-
-/** The real dead-session page the OTP step-1 check has to work from. */
-const ERR_MSG_PAGE = readFileSync(
-  fileURLToPath(new URL('./fixtures/game_start_step2.session-dead.txt', import.meta.url)),
-  'utf8',
-);
 
 /** A manager holding one logged-in user, with a ping we control. */
 function loggedIn(userId: string, ping: () => Promise<void>): SessionManager {
@@ -77,7 +73,6 @@ describe('deliverOtp — session death', () => {
   it('keeps a live session when the OTP page lied about the death', async () => {
     // The "程式發生錯誤" page means "no OTP right now", not necessarily "logged
     // out" — dropping on it would log out a user whose session is fine.
-    expect(ERR_MSG_PAGE).toContain('程式發生錯誤');
     const manager = loggedIn('u2', alive);
     getOtp.mockRejectedValueOnce(new BeanfunError('otp.session_expired', 'gone'));
 

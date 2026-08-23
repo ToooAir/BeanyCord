@@ -88,8 +88,18 @@ export const QR_QUEUE_MAX_WAIT_MS = 120_000;
  *  starts the penalty over. */
 export const IP_BLOCK_PENALTY_MS = 5 * 60_000;
 
-/** A limit of one per interval IS a minimum interval — no separate mechanism. */
-const qrWindow = new SlidingWindow(1, QR_MIN_INTERVAL_MS);
+/**
+ * A limit of one per interval IS a minimum interval — no separate mechanism.
+ *
+ * Exported for the same reason the interval is: the safety argument above is
+ * about ONE request per 30s, and the test suite proves it by driving a window
+ * built from these two numbers. Restating the limit in the test would let this
+ * constant change without the proof re-running — the proof would go on being
+ * about a policy we no longer ship.
+ */
+export const QR_LIMIT = 1;
+
+const qrWindow = new SlidingWindow(QR_LIMIT, QR_MIN_INTERVAL_MS);
 
 // Start as though a mint just happened. Without this, a process that restarts
 // twice in quick succession (a crash loop, a rolled-back deploy) gets a free
@@ -164,7 +174,18 @@ export async function getSessionKey(client: BeanfunClient): Promise<string> {
     console.error(
       `[login] refused by beanfun while pacing one per ${QR_MIN_INTERVAL_MS / 1_000}s — ${qrGate.footprint()}`,
     );
-    throw e;
+    // Re-thrown with the penalty attached. `assertNotIpBlocked` cannot know it —
+    // it inspects a response, not a budget — but by this line `penalise()` has
+    // run and the wait IS known, so passing the original error straight through
+    // threw that away. The caller who actually TRIPPED the block was then the
+    // only one told "about 5 minutes" while everyone queued behind them got the
+    // real remainder, which is backwards: they are the one person certain to be
+    // looking at the screen right now.
+    throw new BeanfunError(
+      'http.ip_blocked',
+      e instanceof Error ? e.message : 'default.aspx: beanfun has rate-limited this IP',
+      IP_BLOCK_PENALTY_MS,
+    );
   }
 
   // The key is on the final redirected URL's query. Scan the final URL first,

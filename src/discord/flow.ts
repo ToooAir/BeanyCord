@@ -1012,11 +1012,26 @@ export async function handleQuickOtp(
 export async function notifySessionExpired(client: Client, userId: string): Promise<void> {
   const user = await client.users.fetch(userId);
   const dm = await user.createDM();
+  // "可能", not "已": since the observation window shipped, this fires while the
+  // session is a *suspect* — the keep-alive has been refused for five minutes,
+  // which we no longer treat as proof. Re-login works right now either way, so
+  // nothing is lost by being accurate.
   const m = await dm.send({
-    content: '⚠️ 你的 Beanfun 登入已失效(保活偵測到連線中斷)。需要時請重新登入:',
+    content: '⚠️ 你的 Beanfun 登入可能已失效(保活連續 5 分鐘被回報未登入)。需要時請重新登入:',
     components: [reloginRow()],
   });
   await setActive(userId, m, 'menu');
+}
+
+/**
+ * The other half of the notice above: the session started answering again on its
+ * own. Worth a message precisely because the previous one told them to re-login
+ * — without this they would do work that turned out to be unnecessary.
+ */
+export async function notifySessionRecovered(client: Client, userId: string): Promise<void> {
+  const user = await client.users.fetch(userId);
+  const dm = await user.createDM();
+  await dm.send('✅ 你的 Beanfun 登入又恢復了(剛才那次是暫時的),不需要重新登入。');
 }
 
 // ---- /logout, login cancel -------------------------------------------------

@@ -31,9 +31,44 @@ export const PING_INTERVAL_MS = 60_000;
  */
 export const PING_FAIL_THRESHOLD = 5;
 
+/**
+ * How long to keep probing a session AFTER the threshold trips, before actually
+ * dropping it. `0` restores the pre-2026-08-26 behaviour of dropping the moment
+ * the threshold is reached.
+ *
+ * Why this exists: we have never once verified that a `session.logged_out`
+ * verdict is PERMANENT. The captures we built the detector against
+ * (`capture/dead/`) are of sessions we deliberately killed — a transient verdict
+ * is byte-identical on the wire. The old code dropped the session at minute 5
+ * and never looked again, so a session that recovered at minute 6 would have
+ * been killed by us and we would never have known.
+ *
+ * **Why 90 minutes.** The 2026-08-26 mass logout landed 6 minutes into a
+ * Gamania maintenance window announced for 08:00-09:00 TW — so the longest
+ * outage this has to outlive is not the ~5 minute IP penalty, it is a
+ * scheduled hour, plus however late we noticed, plus the overrun that
+ * maintenance windows routinely have. An hour is not enough: notice at 08:06
+ * would drop at 09:06, minutes after the session might have come back.
+ *
+ * The user is still told at minute 5 — the notification does not move, only the
+ * drop does. So the cost is a session object kept in memory (and reported as a
+ * suspect by `/status`, not as healthy), and the payoff is the answer to "was it
+ * really dead?".
+ */
+export const DEFAULT_DEATH_OBSERVE_MS = 90 * 60_000;
+
 export interface KeepAliveOptions {
+  /** See `DEFAULT_DEATH_OBSERVE_MS`. */
+  observeMs?: number;
   /** Injected so tests never reach the network. */
   egressIp?: () => Promise<string | undefined>;
+}
+
+function observeMsFromEnv(raw = process.env.SESSION_DEATH_OBSERVE_MINUTES): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_DEATH_OBSERVE_MS;
+  const mins = Number(raw.trim());
+  if (!Number.isFinite(mins) || mins < 0) return DEFAULT_DEATH_OBSERVE_MS;
+  return mins * 60_000;
 }
 
 /** "3.2 min" — durations in logs are read by a human at 2am. */
@@ -70,12 +105,18 @@ export interface UserState {
   accounts?: ServiceAccount[];
   /** Consecutive keep-alive ping failures (reset on any success). */
   pingFails?: number;
+  /** When the failure threshold first tripped (ms epoch). While set, the session
+   *  is a *suspect*: the user has been told, but we keep probing until the
+   *  observation window closes, so a verdict that lifts on its own is recorded
+   *  as such instead of being mistaken for a death. */
+  suspectAt?: number;
 }
 
 export class SessionManager {
   private states = new Map<string, UserState>();
   private mutexes = new Map<string, Mutex>();
   private readonly store: SessionStore | null;
+  private readonly observeMs: number;
   private readonly egressIp: () => Promise<string | undefined>;
 
   /**
@@ -86,8 +127,16 @@ export class SessionManager {
    */
   onSessionExpired?: (userId: string) => Promise<void>;
 
+  /**
+   * Called when a session that had already been declared a suspect starts
+   * answering again — i.e. the "logged out" verdict was NOT permanent. Rare
+   * enough to be worth a message: the user was told to re-login a moment ago.
+   */
+  onSessionRecovered?: (userId: string) => Promise<void>;
+
   constructor(store: SessionStore | null = null, opts: KeepAliveOptions = {}) {
     this.store = store;
+    this.observeMs = opts.observeMs ?? observeMsFromEnv();
     this.egressIp = opts.egressIp ?? getEgressIp;
   }
 
@@ -114,6 +163,25 @@ export class SessionManager {
     let n = 0;
     for (const s of this.states.values()) if (s.session) n += 1;
     return n;
+  }
+
+  /**
+   * Of those, how many are only *suspected* live — the keep-alive has been
+   * refused past the threshold and we are still probing.
+   *
+   * Reported separately because the observation window would otherwise make
+   * `/status` confidently wrong for an hour and a half, which is exactly the
+   * cost the old drop-at-minute-5 behaviour was avoiding.
+   */
+  suspectSessionCount(): number {
+    let n = 0;
+    for (const s of this.states.values()) if (s.session && s.suspectAt !== undefined) n += 1;
+    return n;
+  }
+
+  /** Whether this user's session is under observation rather than known good. */
+  isSuspect(userId: string): boolean {
+    return this.states.get(userId)?.suspectAt !== undefined;
   }
 
   /** Drop a fresh client (clean cookie jar) for a new login attempt. */
@@ -193,8 +261,8 @@ export class SessionManager {
       if (!st?.session) return;
       // A single failure is transient (network / risk control) — retry next
       // tick, mirroring the Rust ping loop. But a long unbroken run of failures
-      // means the server-side session is dead: drop it and notify, so the user
-      // doesn't discover the corpse at their next OTP attempt.
+      // means the server-side session is *probably* dead: tell the user, then
+      // keep probing for `observeMs` so that "probably" can be checked.
       void st.client.ping().then(
         () => this.onPingSuccess(userId, st),
         (e) => {
@@ -213,6 +281,19 @@ export class SessionManager {
   private onPingSuccess(userId: string, st: UserState): void {
     const failed = st.pingFails ?? 0;
     st.pingFails = 0;
+    if (st.suspectAt !== undefined) {
+      const down = Date.now() - st.suspectAt;
+      st.suspectAt = undefined;
+      // The finding this whole observation window exists to produce. Loud on
+      // purpose: it falsifies the assumption every part of the death path is
+      // built on, and the old code could not have printed it.
+      console.warn(
+        `[ping] RECOVERED for ${userId} after ${mins(down)} of "logged out" — ` +
+          'the verdict was NOT permanent; this session would have been killed by us',
+      );
+      void this.onSessionRecovered?.(userId).catch(() => undefined);
+      return;
+    }
     if (failed > 0) console.log(`[ping] ${userId} recovered after ${failed} failure(s)`);
   }
 
@@ -225,17 +306,27 @@ export class SessionManager {
     console.warn(`[ping] fail #${n} for ${userId} (age=${this.ageOf(st)}): ${safeError(e)}`);
     if (n < PING_FAIL_THRESHOLD) return;
 
+    if (st.suspectAt === undefined) {
+      st.suspectAt = Date.now();
+      console.warn(
+        `[session] keep-alive failed ${n}x for ${userId} (age=${this.ageOf(st)}) — ` +
+          (this.observeMs > 0
+            ? `notifying, and probing for another ${mins(this.observeMs)} before dropping`
+            : 'dropping session'),
+      );
+      // Not awaited: the drop decision must never wait on a third-party
+      // service, least of all under a timer.
+      void this.egressIp().then((ip) =>
+        console.warn(`[session] ${userId} suspected dead — egress=${ip ?? 'unknown'}`),
+      );
+      void this.onSessionExpired?.(userId).catch(() => undefined);
+    }
+
+    if (this.observeMs > 0 && Date.now() - st.suspectAt < this.observeMs) return;
     console.warn(
-      `[session] keep-alive failed ${n}x for ${userId} (age=${this.ageOf(st)}) — dropping session`,
-    );
-    // Not awaited: dropping a session must never wait on a third-party service,
-    // least of all from inside a timer. The reading lands in the log a moment
-    // later, next to the drop it belongs to.
-    void this.egressIp().then((ip) =>
-      console.warn(`[session] ${userId} dropped — egress=${ip ?? 'unknown'}`),
+      `[session] dropping ${userId} — still logged out after ${mins(Date.now() - st.suspectAt)} of probing`,
     );
     this.remove(userId);
-    void this.onSessionExpired?.(userId).catch(() => undefined);
   }
 
   private stopPing(userId: string): void {

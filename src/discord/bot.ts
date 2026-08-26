@@ -39,6 +39,7 @@ import {
   handleOtpRefresh,
   handleQuickOtp,
   notifySessionExpired,
+  notifySessionRecovered,
 } from './flow.js';
 import { CID, parseOtpRefresh } from './ids.js';
 import { formatUptime, startPresenceRotation } from './presence.js';
@@ -178,6 +179,7 @@ export async function createBot(token: string): Promise<Client> {
   // Tell the user when the keep-alive loop declares their session dead, so
   // they relog on their own schedule instead of hitting a dead session later.
   manager.onSessionExpired = (userId) => notifySessionExpired(client, userId);
+  manager.onSessionRecovered = (userId) => notifySessionRecovered(client, userId);
 
   // Restore before login: pings resume immediately, and any expiry notices fire
   // only after the gateway is up (the ping interval is 60s, login takes ms).
@@ -242,13 +244,20 @@ async function dispatch(
         });
       case 'status': {
         if (!(await isAuthorized(access, interaction))) return refuse(interaction, NO_ACCESS);
-        const mine = manager.isLoggedIn(interaction.user.id)
-          ? '✅ 已登入 (session 持續保活中)。可直接 /login 進入選單。'
-          : '尚未登入。執行 /login 開始。';
+        // Three states, not two: since the observation window shipped, a session
+        // can be held while the keep-alive is being refused. Calling that "已登入"
+        // would be confidently wrong for up to 90 minutes.
+        const mine = !manager.isLoggedIn(interaction.user.id)
+          ? '尚未登入。執行 /login 開始。'
+          : manager.isSuspect(interaction.user.id)
+            ? '⚠️ 登入狀態不明:保活被回報未登入,正在觀察是否恢復。可以先按重新登入,不必等。'
+            : '✅ 已登入 (session 持續保活中)。可直接 /login 進入選單。';
         // Authorized-only stats (not broadcast in the public presence).
-        const stats = `🤖 目前維持 ${manager.activeSessionCount()} 個帳號 session,已運行 ${formatUptime(
-          Date.now() - STARTED_AT,
-        )}。`;
+        const suspects = manager.suspectSessionCount();
+        const stats =
+          `🤖 目前維持 ${manager.activeSessionCount()} 個帳號 session` +
+          (suspects > 0 ? `(其中 ${suspects} 個保活異常觀察中)` : '') +
+          `,已運行 ${formatUptime(Date.now() - STARTED_AT)}。`;
         return void interaction.reply({
           content: `${mine}\n${stats}`,
           flags: isBotDm(interaction) ? undefined : MessageFlags.Ephemeral,

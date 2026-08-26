@@ -671,6 +671,7 @@ session；暫時性判定在 wire 上完全一樣。舊的迴圈在第 5 分鐘�
 | 每一次失敗（`#n` + code + 年齡 + cadence），不只第 5 次 | 「連續 5 次登出」vs「4 次網路錯誤 + 1 次登出」 |
 | session 出生與判死時的**出口 IP**（`EGRESS_IP_URL`） | 出口 IP 是否在我們腳下換掉 |
 | `echo_token` 回應的 `Server`／`X-Powered-By`／`Set-Cookie` **名稱**（`pingFingerprint`，只記名不記值） | beanfun 是否換了後端節點 |
+| 判死後**繼續探測 90 分鐘**才丟（`SESSION_DEATH_OBSERVE_MINUTES`） | 那個判定是不是永久的 —— 若翻回 `ResultCode:1`，log 會印 `[ping] RECOVERED`。90 分鐘是為了蓋過**已公告的一小時維護**加上發現延遲與逾時；一小時不夠（08:06 發現 → 09:06 丟掉，正好比維護結束早幾分鐘） |
 
 **刻意沒有做的事：用高頻率／高併發的保活去「確認 session 還活著」。** 記錄在這裡，免得
 下次又想一遍：

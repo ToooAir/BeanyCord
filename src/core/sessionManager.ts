@@ -13,6 +13,7 @@ import { CookieJar } from 'tough-cookie';
 
 import { BeanfunClient } from '../beanfun/client.js';
 import type { QrLoginInit, ServiceAccount, Session } from '../beanfun/types.js';
+import { getEgressIp } from './egressIp.js';
 import { safeError } from './redact.js';
 import type { SessionStore } from './store.js';
 
@@ -29,6 +30,16 @@ export const PING_INTERVAL_MS = 60_000;
  * rather than either number on its own.
  */
 export const PING_FAIL_THRESHOLD = 5;
+
+export interface KeepAliveOptions {
+  /** Injected so tests never reach the network. */
+  egressIp?: () => Promise<string | undefined>;
+}
+
+/** "3.2 min" — durations in logs are read by a human at 2am. */
+function mins(ms: number): string {
+  return `${(ms / 60_000).toFixed(1)} min`;
+}
 
 /** Minimal FIFO async mutex — chains tasks so only one runs at a time. */
 class Mutex {
@@ -65,6 +76,7 @@ export class SessionManager {
   private states = new Map<string, UserState>();
   private mutexes = new Map<string, Mutex>();
   private readonly store: SessionStore | null;
+  private readonly egressIp: () => Promise<string | undefined>;
 
   /**
    * Called when a user's keep-alive has failed PING_FAIL_THRESHOLD times in a
@@ -74,8 +86,9 @@ export class SessionManager {
    */
   onSessionExpired?: (userId: string) => Promise<void>;
 
-  constructor(store: SessionStore | null = null) {
+  constructor(store: SessionStore | null = null, opts: KeepAliveOptions = {}) {
     this.store = store;
+    this.egressIp = opts.egressIp ?? getEgressIp;
   }
 
   /** Get (creating if needed) the user's state + fresh client. */
@@ -136,6 +149,15 @@ export class SessionManager {
   async persist(userId: string): Promise<void> {
     const s = this.states.get(userId);
     if (!s?.session) return;
+    if (s.session.bornAt === undefined) {
+      s.session.bornAt = Date.now();
+      // The "before" reading. Compared against the one taken at death, it is the
+      // whole test for "did our egress IP move under us?" — and it is only
+      // available if we take it now, while everything still works.
+      void this.egressIp().then((ip) =>
+        console.log(`[session] ${userId} session born — egress=${ip ?? 'unknown'}`),
+      );
+    }
     this.startPing(userId);
     if (!this.store) return;
     const cookies = await s.client.jar.serialize();
@@ -174,22 +196,46 @@ export class SessionManager {
       // means the server-side session is dead: drop it and notify, so the user
       // doesn't discover the corpse at their next OTP attempt.
       void st.client.ping().then(
-        () => {
-          st.pingFails = 0;
-        },
+        () => this.onPingSuccess(userId, st),
         (e) => {
           st.pingFails = (st.pingFails ?? 0) + 1;
-          if (st.pingFails >= PING_FAIL_THRESHOLD) {
-            console.warn(
-              `[session] keep-alive failed ${st.pingFails}x for ${userId} — dropping session:`,
-              safeError(e),
-            );
-            this.remove(userId);
-            void this.onSessionExpired?.(userId).catch(() => undefined);
-          }
+          this.onPingFailure(userId, st, e);
         },
       );
     }, PING_INTERVAL_MS);
+  }
+
+  /** Age of a live session, or `undefined` for one persisted before `bornAt`. */
+  private ageOf(st: UserState): string {
+    return st.session?.bornAt === undefined ? 'unknown' : mins(Date.now() - st.session.bornAt);
+  }
+
+  private onPingSuccess(userId: string, st: UserState): void {
+    const failed = st.pingFails ?? 0;
+    st.pingFails = 0;
+    if (failed > 0) console.log(`[ping] ${userId} recovered after ${failed} failure(s)`);
+  }
+
+  private onPingFailure(userId: string, st: UserState, e: unknown): void {
+    const n = st.pingFails ?? 0;
+    // EVERY failure, not just the one that trips the threshold. The 5th failure
+    // alone cannot tell you whether the first four were the same thing — four
+    // network errors followed by one `session.logged_out` reads identically in
+    // the old log, and means something completely different.
+    console.warn(`[ping] fail #${n} for ${userId} (age=${this.ageOf(st)}): ${safeError(e)}`);
+    if (n < PING_FAIL_THRESHOLD) return;
+
+    console.warn(
+      `[session] keep-alive failed ${n}x for ${userId} (age=${this.ageOf(st)}) — dropping session`,
+    );
+    // Not awaited: dropping a session must never wait on a third-party service,
+    // least of all from inside a timer. The reading lands in the log a moment
+    // later, next to the drop it belongs to.
+    void this.egressIp().then((ip) =>
+      console.warn(`[session] ${userId} dropped — egress=${ip ?? 'unknown'}`),
+    );
+    this.remove(userId);
+    void this.onSessionExpired?.(userId).catch(() => undefined);
   }
 
   private stopPing(userId: string): void {

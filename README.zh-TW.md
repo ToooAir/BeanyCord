@@ -122,6 +122,8 @@ npm run bot                 # 啟動機器人
   任何主動使用——登入、換遊戲、取 OTP——都會刷新時效，因此只有真正**廢棄**的
   session 會過期（背景 keep-alive ping 不算使用）。清除只在**行程重啟／重新部署
   載入時** lazy 觸發，沒有常駐計時器。
+- `EGRESS_IP_URL`（預設 `https://api.ipify.org`，設空字串關閉）：session 出生與被
+  判死時各查一次對外 IP 並寫進 log。用來回答「出口 IP 是不是在我們腳下換掉了」。
 
 ## 部署（Zeabur）
 

@@ -34,6 +34,9 @@ export interface ClientOptions {
 
 export class BeanfunClient {
   readonly jar: CookieJar;
+  /** Last `echo_token.ashx` fingerprint, so a change can be logged once rather
+   *  than every 60 seconds. See `pingFingerprint`. */
+  private lastPingFingerprint?: string;
   /** Follows redirects (default for every call). */
   readonly http: Got;
   /** Does NOT follow redirects — for the return.aspx Set-Cookie scrape. */
@@ -108,10 +111,50 @@ export class BeanfunClient {
       { searchParams: { webtoken: '1' } },
     );
     ensureSuccess(res, 'echo_token.ashx');
+    const fp = pingFingerprint(res);
+    if (fp !== this.lastPingFingerprint) {
+      // A backend switch is one of only two live explanations for several
+      // INDEPENDENT sessions being declared logged out in the same minute (the
+      // other is the egress IP moving) — if beanfun's session state is not
+      // shared across their nodes, being moved to another one looks exactly
+      // like being logged out. Nothing else we fetch runs often enough to see
+      // it happen, and we were keeping no response headers at all.
+      console.log(
+        `[ping] server fingerprint ${this.lastPingFingerprint === undefined ? 'seen' : 'CHANGED'}: ${fp}`,
+      );
+      this.lastPingFingerprint = fp;
+    }
     if (isLoggedOutEcho(boundedText(res))) {
       throw new BeanfunError('session.logged_out', 'echo_token.ashx reports the session is logged out');
     }
   }
+}
+
+/**
+ * Which server answered, in one line — host, banner headers, and the NAMES of
+ * any cookies it set.
+ *
+ * Names only, never values: this is the one response we fetch every 60 seconds
+ * for every logged-in user, and a `Set-Cookie` value here would put live session
+ * tokens into the log forever. `redactText` would not save us; not reading the
+ * value is what saves us.
+ */
+export function pingFingerprint(res: Response): string {
+  const one = (k: string): string => {
+    const v = res.headers[k];
+    return (Array.isArray(v) ? v[0] : v) ?? '-';
+  };
+  const names = (res.headers['set-cookie'] ?? [])
+    .map((c) => c.split('=')[0]?.trim() ?? '?')
+    .sort()
+    .join(',');
+  let host = '?';
+  try {
+    host = new URL(finalUrl(res)).host;
+  } catch {
+    /* a response with no usable URL must not break the diagnostic that names it */
+  }
+  return `host=${host} server=${one('server')} powered=${one('x-powered-by')} aspnet=${one('x-aspnet-version')} setcookie=[${names}]`;
 }
 
 /**

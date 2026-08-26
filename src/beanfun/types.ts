@@ -19,6 +19,13 @@ export interface Session {
   /** sid of the last account an OTP was issued for — UI-only, lets `/otp` skip
    *  the game/account menus. Optional (older persisted sessions won't have it). */
   lastSid?: string;
+  /** When this session first came into existence (ms epoch), stamped on the
+   *  first `persist`. Diagnostic only: it is what lets a keep-alive death be
+   *  reported with an AGE, which is the difference between "everyone died at
+   *  the same age" and "everyone died at the same moment" — two explanations
+   *  that are indistinguishable without it. Optional (older persisted sessions
+   *  won't have it). */
+  bornAt?: number;
 }
 
 /** One row of the user's service-account list. Mirrors Rust `ServiceAccount`. */

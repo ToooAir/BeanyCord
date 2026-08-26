@@ -38,11 +38,15 @@ async function withKeepAlive(
   userId: string,
   ping: () => Promise<void>,
 ): Promise<{ manager: SessionManager; expired: string[] }> {
-  const manager = new SessionManager();
+  // `egressIp` is stubbed unconditionally: the real one makes a network
+  // request, and under fake timers a unit test must never depend on one
+  // resolving.
+  const manager = new SessionManager(null, { egressIp: async () => undefined });
   const expired: string[] = [];
   manager.onSessionExpired = async (u) => void expired.push(u);
   const state = manager.getOrCreate(userId);
-  state.session = SESSION;
+  // A fresh copy per test: `persist` stamps `bornAt` onto it.
+  state.session = { ...SESSION };
   state.client = { ping } as unknown as BeanfunClient;
   await manager.persist(userId);
   return { manager, expired };
@@ -180,6 +184,14 @@ describe('the keep-alive loop', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('stamps a birth time, so a death can be reported with an age', async () => {
+    // Which is the difference between "they all died at the same age" and "they
+    // all died at the same moment" — two explanations that are indistinguishable
+    // without it, and we spent an evening unable to tell them apart.
+    const { manager } = await withKeepAlive('u6', () => Promise.resolve());
+    expect(manager.get('u6')?.session?.bornAt).toBeTypeOf('number');
   });
 
   it('tolerates roughly five minutes before giving up on a session', async () => {

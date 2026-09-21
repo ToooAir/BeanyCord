@@ -772,7 +772,14 @@ export async function deliverOtp(
       // nothing at all, and the code — which is the actionable part — never
       // leaves the process.
       const code = e instanceof BeanfunError ? e.code : 'unknown';
-      console.error(`[otp] failed for ${userId} (${code}, verdict=${verdict}):`, errText(e));
+      // Age separates the two shapes this failure could have: a per-session
+      // lifetime (every occurrence lands at the same age) from a server-side
+      // event everyone shares (ages differ, wall-clock times cluster). Nobody
+      // probes this page except a user pressing a button, so the timestamp
+      // alone only says when it was NOTICED.
+      const bornAt = state.session?.bornAt;
+      const age = bornAt === undefined ? 'unknown' : `${((Date.now() - bornAt) / 3_600_000).toFixed(1)}h`;
+      console.error(`[otp] failed for ${userId} (${code}, verdict=${verdict}, age=${age}):`, errText(e));
       await write(payloadFor(verdict, otpFailureMessage(e)));
     }
   });

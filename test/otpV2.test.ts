@@ -101,14 +101,17 @@ interface Call {
 /** Records every request; answers step 1 with `page` and the v2 POST with `v2`.
  *  `failOn` makes any URL containing that fragment throw, like a 5xx would. */
 function recordingClient(
-  page: string,
+  page: string | string[],
   v2: unknown,
   failOn?: string,
 ): { client: BeanfunClient; calls: Call[] } {
   const calls: Call[] = [];
+  // A list serves one page per step-1 call (the last one sticks), which is how
+  // a retry that is supposed to see a *different* page gets tested at all.
+  const pages = Array.isArray(page) ? [...page] : [page];
   const respond = (url: string): unknown => {
     if (url.includes('get_webstart_otp_v2.ashx')) return v2;
-    if (url.includes('game_start_step2.aspx')) return page;
+    if (url.includes('game_start_step2.aspx')) return pages.length > 1 ? pages.shift()! : pages[0]!;
     if (url.includes('get_cookies.ashx')) return "var m_strSecretCode = 'SECRET';";
     return '';
   };
@@ -385,5 +388,47 @@ describe('getOtp — route selection', () => {
     const legacy = called(calls, 'ppppp=');
     expect(legacy?.url).toContain(`&CV=${GGM_CV}`);
     expect(legacy?.url).toContain(`&Hash=${GGM_HASH}`);
+  });
+});
+
+/** What the portal actually served on 2026-09-21: HTTP 200, no handoff, no key. */
+const ERR_MSG_PAGE =
+  '\uFEFF<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN">\n' +
+  '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Err Msg</title></head>' +
+  '<body><h3>程式發生錯誤</h3></body></html>';
+
+describe('getOtp — the crashed step 1 that is not a dead session', () => {
+  it('re-primes auth.aspx and retries once', async () => {
+    const { client, calls } = recordingClient([ERR_MSG_PAGE, LEGACY_PAGE], {});
+    // Fails at the envelope (step 5 answers ''), which is fine: what is on
+    // trial is that the retry got past step 1 at all.
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toMatchObject({
+      code: 'otp.empty_response',
+    });
+
+    const order = calls.map((c) => c.url);
+    const auth = order.findIndex((u) => u.includes('auth.aspx'));
+    const step2s = order.flatMap((u, i) => (u.includes('game_start_step2.aspx') ? [i] : []));
+    expect(auth).toBeGreaterThan(step2s[0]!); // primed AFTER the crash
+    expect(auth).toBeLessThan(step2s[1]!); // and BEFORE the retry
+    expect(logged.join('\n')).toContain('RECOVERED');
+  });
+
+  it('gives up after one retry, and says the priming did not help', async () => {
+    const { client, calls } = recordingClient(ERR_MSG_PAGE, {});
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toMatchObject({
+      code: 'otp.session_expired',
+    });
+
+    // One retry, not a loop: two step-1 calls and a single priming request.
+    expect(calls.filter((c) => c.url.includes('game_start_step2.aspx'))).toHaveLength(2);
+    expect(calls.filter((c) => c.url.includes('auth.aspx'))).toHaveLength(1);
+    expect(logged.join('\n')).toContain('still crashed');
+  });
+
+  it('does not retry an error that is not the crashed page', async () => {
+    const { client, calls } = recordingClient(ERR_MSG_PAGE, {}, 'game_start_step2.aspx');
+    await expect(getOtp(client, SESSION, ACCOUNT, '600309', 'A2')).rejects.toThrow(/upstream blew up/);
+    expect(calls.filter((c) => c.url.includes('auth.aspx'))).toHaveLength(0);
   });
 });

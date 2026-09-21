@@ -58,8 +58,14 @@ export async function getAccounts(
   return { accounts, amountLimitNotice: classifyNotice(body) };
 }
 
-/** GET auth.aspx — cookie side-effect only. Prefer the live jar bfWebToken. */
-async function authAspx(
+/**
+ * GET auth.aspx — cookie side-effect only. Prefer the live jar bfWebToken.
+ *
+ * Exported because it is the portal entry the OTP path skips whenever the
+ * account list is already cached; `otp.ts` replays it before giving up on a
+ * `game_start_step2.aspx` that crashed. See `step1WithReprime`.
+ */
+export async function authAspx(
   client: BeanfunClient,
   session: Session,
   serviceCode: string,

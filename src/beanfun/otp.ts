@@ -42,6 +42,7 @@
  *   prefer it, and keep the constant only for pages that supply nothing.
  */
 import { safeError } from '../core/redact.js';
+import { authAspx } from './account.js';
 import {
   assertNotIpBlocked,
   BeanfunClient,
@@ -90,7 +91,7 @@ export async function getOtp(
   serviceCode: string,
   serviceRegion: string,
 ): Promise<string> {
-  const step1 = await step1Init(client, account, serviceCode, serviceRegion);
+  const step1 = await step1WithReprime(client, session, account, serviceCode, serviceRegion);
 
   // Route on what the handoff DECODED to, not on it being present. A page can
   // carry `m_objData` and still hand the launcher the legacy parameter set
@@ -114,6 +115,51 @@ export async function getOtp(
   await step4LongPoll(client, step1.longPollingKey);
   const envelope = await step5GetOtp(client, session, account, step1, secretCode, serviceCode, serviceRegion);
   return decryptEnvelope(envelope);
+}
+
+/**
+ * Step 1, with one re-primed retry before the failure is reported.
+ *
+ * `game_start_step2.aspx` can answer with the generic "程式發生錯誤" page in a
+ * state that is NOT a dead session. Measured 2026-09-21 on two users, 13 hours
+ * apart: `echo_token` answered HTTP 200 and did not say logged out ~50ms later,
+ * and after a fresh login the same game's page worked 68 seconds after the
+ * failure. A session that is really gone looks nothing like this — it answers
+ * `logged out` on the ping and 「尚未登入」on the account list (measured the
+ * same day against a month-old session).
+ *
+ * The one request that separates the two cases is `auth.aspx`: `getAccounts`
+ * always runs it first, so the OTP right after a login is primed — but
+ * `resolveAccount` serves a cached account list without it, so every later OTP
+ * goes straight at `game_start_step2.aspx` and the portal is never re-entered.
+ *
+ * So replay it once and retry. The log line is the experiment: whichever way the
+ * next occurrence goes, it says whether priming was the missing piece — and if
+ * it was, the user never sees the re-login prompt at all.
+ */
+async function step1WithReprime(
+  client: BeanfunClient,
+  session: Session,
+  account: ServiceAccount,
+  sc: string,
+  sr: string,
+): Promise<Step1> {
+  try {
+    return await step1Init(client, account, sc, sr);
+  } catch (e) {
+    if (!(e instanceof BeanfunError && e.code === 'otp.session_expired')) throw e;
+    // Best effort: if the priming request itself fails, the retry below still
+    // gets to answer the question, and its failure is the one worth reporting.
+    await authAspx(client, session, sc, sr).catch(() => undefined);
+    try {
+      const primed = await step1Init(client, account, sc, sr);
+      console.warn('[otp] step1 crashed, re-primed auth.aspx and retried -> RECOVERED');
+      return primed;
+    } catch (again) {
+      console.warn('[otp] step1 crashed, re-primed auth.aspx and retried -> still crashed');
+      throw again;
+    }
+  }
 }
 
 async function step1Init(

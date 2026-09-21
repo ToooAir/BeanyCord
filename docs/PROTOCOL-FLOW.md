@@ -628,6 +628,11 @@ GET tw.beanfun.com/beanfun_block/generic_handlers/echo_token.ashx?webtoken=1
 只是內容變成登入頁 —— 所以任何「狀態碼正常就當成功」的判斷在這條鏈上都是錯的。
 判定 session 死亡、要丟掉使用者的 session 之前，一律以 `echo_token` 為準。
 
+**但它誠實回報的是「`bfWebToken` 還算不算數」，不是整個 portal 的健康狀態。** 2026-09-21
+量到 echo_token 說活著、同一個 session 的 `game_start_step2.aspx` 同時回錯誤頁 ——
+反過來用（「頁面壞了 ⇒ session 死了」）是錯的，見〈`otp.session_expired` 不等於 session
+死亡〉。
+
 ### 保活判死：一個還沒被驗證的假設
 
 **2026-08-26 那次已結案：Gamania 公告的例行維護。** 官網預告 08/26 **08:00–09:00 TW
@@ -670,7 +675,7 @@ session；暫時性判定在 wire 上完全一樣。舊的迴圈在第 5 分鐘�
 | --- | --- |
 | 每一次失敗（`#n` + code + 年齡 + cadence），不只第 5 次 | 「連續 5 次登出」vs「4 次網路錯誤 + 1 次登出」 |
 | session 出生與判死時的**出口 IP**（`EGRESS_IP_URL`） | 出口 IP 是否在我們腳下換掉 |
-| `echo_token` 回應的 `Server`／`X-Powered-By`／`Set-Cookie` **名稱**（`pingFingerprint`，只記名不記值） | beanfun 是否換了後端節點 |
+| `echo_token` 回應的 `Server`／`X-Powered-By`／`Set-Cookie` **名稱**（`pingFingerprint`，只記名不記值） | ~~beanfun 是否換了後端節點~~ —— **實測量不到**（2026-09-21）。這個端點的三個 banner **永遠是 `-`**，唯一會變的是 `setcookie=[]` ↔ `[bfTD]`，而健康 session 的頭兩次 ping 就在跳。至今每一行 `CHANGED` 都是 cookie 補發的雜訊，不是節點變化。要真的識別節點，得先把 echo 回應的 header **名稱清單**印一次，看有沒有 `via`／`x-cache` 之類可用的欄位 |
 | 判死後**繼續探測 90 分鐘**才丟（`SESSION_DEATH_OBSERVE_MINUTES`） | 那個判定是不是永久的 —— 若翻回 `ResultCode:1`，log 會印 `[ping] RECOVERED`。90 分鐘是為了蓋過**已公告的一小時維護**加上發現延遲與逾時；一小時不夠（08:06 發現 → 09:06 丟掉，正好比維護結束早幾分鐘） |
 
 **刻意沒有做的事：用高頻率／高併發的保活去「確認 session 還活著」。** 記錄在這裡，免得
@@ -686,6 +691,46 @@ session；暫時性判定在 wire 上完全一樣。舊的迴圈在第 5 分鐘�
   的**上界**，不是預算。
 
 所以這裡只做被動記錄，不改變保活行為本身。
+
+### `otp.session_expired` 不等於 session 死亡（2026-09-21）
+
+**兩個使用者、相隔 13 小時 11 分，被一個還活著的 session 要求重新登入。**
+`game_start_step2.aspx` 回的東西**簽章**跟 `capture/dead/game_start_step2.aspx.txt`（2KB 的
+「程式發生錯誤」頁）一致 —— 沒有 handoff、沒有 `longPollingKey`、是 HTML（body 本身沒留下來，
+log 只記路線與欄位名）。OTP 路徑於是用消去法把它判成 `otp.session_expired`。
+
+它不是死亡，而且 log 自己就說得夠清楚：
+
+| 觀察 | 值 |
+| --- | --- |
+| 確認用的 ping | HTTP 200、沒說登出，在錯誤前 **47ms／1ms**。fingerprint 那行只在 `ensureSuccess` 之後才印，所以那兩次 ping 真的打到了應用層 |
+| `[ping] fail #` | 整段窗口內兩位使用者各 **0 次** |
+| 重新登入後的同一支頁面 | **68 秒**後正常、**2 分 13 秒**後正常 —— portal 本身是好的 |
+| 真死長什麼樣（同日實測一個一個月大的 jar） | `echo_token` → `User is logged out.`、帳號列表 → 「尚未登入」。兩位使用者**都不是**這個形狀 |
+| jar 裡的到期時間 | 只有 `bfSecretCode` 30 分鐘；`ASP.NET_SessionId`／`bfWebToken`／`bfTD` 全是 session cookie。**我們這端沒有任何「約 24 小時」會過期的東西** |
+
+**最像的原因：少打了 `auth.aspx`。** `getAccounts` 一定先打它（`account.ts::authAspx`，
+註解寫 "cookie side-effect only"），所以**登入後第一次**取 OTP 是被 prime 過的；但
+`resolveAccount` 只要 `state.accounts` 還在記憶體就直接用快取，**整個 `getAccounts` 被跳過**，
+之後每次 OTP 都是裸打 `game_start_step2.aspx`，portal 再也沒有被重新進入過。這正好對得上
+回報的形狀：剛登入好用、放幾小時後突然壞、重登又好。
+
+`2c9591e` 上線的是 **prime 一次 + 重試一次**（`otp.ts::step1WithReprime`），兩種結果各印一行：
+
+```
+[otp] step1 crashed, re-primed auth.aspx and retried -> RECOVERED
+[otp] step1 crashed, re-primed auth.aspx and retried -> still crashed
+```
+
+**那行 log 就是實驗。** `RECOVERED` = 根因確認，而且使用者從此看不到那個重新登入的提示；
+`still crashed` = 排除 priming，使用者拿到的跟以前完全一樣。沒有重現環境可以先測 —— 真正
+壞掉的 session 在本機重現不出來（舊的已經真死，新的是健康的），所以實驗只能長在線上這條
+**原本就注定失敗**的路徑上。
+
+**讀 log 的陷阱：失敗的時間戳是「被發現」的時間，不是「壞掉」的時間。** 那支頁面只有使用者
+按按鈕才會被踩到，所以相隔 13 小時的兩次失敗，跟「同一刻一起壞、隔 13 小時各自發現」完全
+相容 —— 時間戳本身分不出來。分辨它的是失敗那行的 `age=`（同樣上線於 `2c9591e`）：每次都
+落在同一個年齡 = 每個 session 自己的壽命；年齡差很多但 wall-clock 擠在一起 = 全域事件。
 
 ---
 

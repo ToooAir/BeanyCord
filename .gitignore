@@ -14,3 +14,7 @@ capture/
 
 # Internal AI planning notes — contain local paths / session metadata; never publish
 docs/memory/
+
+# Claude Code conversation exports (`/export` writes them here, dated): whole
+# sessions, including log excerpts with user ids and egress IPs.
+/20??-??-??-*.txt
